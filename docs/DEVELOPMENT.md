@@ -755,6 +755,7 @@ python -m unittest tests.test_gui       # 66 個（Tk）
 | **套件裝進全域直譯器** | `pip install PySide6` 裝進了 Python 3.13 的 user site-packages，而你實際用的是 anaconda base——其他 Python 完全看不到，也不該去污染系統環境 | 建立專案專屬 `.venv`（`bbpull venv --create`）；`python -m bbpull` 偵測到專案環境會**自動重新以它執行**，所以從哪個 Python 啟動結果都一致 |
 | **改壞了 `bbpull.cmd`** | 用會把行尾正規化成 LF 的編輯器重寫 `.bat`，而 **cmd.exe 遇到裸 LF 會把 REM 註解片段當指令執行**（5 行裡 3 行報錯） | 以 CRLF 重寫，加上 `.gitattributes`（`*.cmd text eol=crlf`）強制，並補上「不得有裸 LF」的迴歸測試 |
 | **顯示的安裝指令無法貼上使用** | 產生的提示是 `pip install requests>=2.31.0`，未加引號的 `>` 在 shell 裡是**重導向**——pip 只收到 `requests`，並產生一個名為 `=2.31.0` 的檔案 | `shell_command()` 對含 shell 特殊字元的參數加引號，並測試每個危險字元 |
+| **`bbpull-gui.exe` 雙擊閃退** | 雙擊不帶參數，而 CLI 在沒有子命令時會開**互動文字選單**——GUI 子系統行程沒有主控台也沒有 stdin，開不起來就結束（代碼 2）。**而且第一次的 smoke test 傳了 `gui` 參數，測不到使用者唯一會走的路徑** | 視窗版本在無參數時預設 `gui`；失敗時寫入 `%LOCALAPPDATA%\bbpull\bbpull-error.log` 並用 MessageBox 顯示；smoke test 改用 `os.startfile`（等同雙擊）驗證 |
 | **打包後 `selftest` 崩潰** | `unittest` 被我放進 PyInstaller 的 excludes，而打包版本又沒有 `tests/` 目錄（解壓到 `_MEI…` 暫存夾），`unittest discover` 直接拋 `Start directory is not importable` | 打包版本改跑**執行檔自我檢查**（相依套件、GUI 引擎、Qt 外掛、目錄可寫性）；`unittest` 不再排除 |
 | **打包後登入狀態會消失** | `PROJECT_ROOT` 在凍結後指向 PyInstaller 的 `_MEI…` 暫存夾，`.state/` 與 `.env` 都寫在那裡，程式結束就被刪掉 | 凍結時改用 `%LOCALAPPDATA%\bbpull\`；並在自我檢查中加入「state 目錄不得位於暫存區」的斷言 |
 | **進入點相對匯入** | PyInstaller 以**頂層模組**執行指定的腳本，`from .cli import main` 會拋 `attempted relative import with no known parent package`——建置成功，啟動即死 | 新增 `installer/entry.py` 只用絕對匯入 |
@@ -763,6 +764,12 @@ python -m unittest tests.test_gui       # 66 個（Tk）
 | **建置被執行中的 exe 卡住** | Windows 不允許刪除執行中的 `.exe`，前一次 smoke test 留下的行程讓建置在 COLLECT 階段 `PermissionError` | 建置前先 `taskkill`，並在無法清空 `dist/` 時給出明確訊息 |
 | **`QBuffer` 造成存取違反** | `QBuffer(QByteArray())` 的暫存物件會被 Python 回收，Qt 仍在寫入 → 行程以 `0xC0000005` 直接崩潰，不是拋例外 | 保留 `QByteArray` 的參考直到寫完 |
 | **`packaging/` 目錄名稱衝突** | 這個名字與 PyPI 的 `packaging`（pip 相依）同名，`import packaging.make_icon` 會抓到別人的套件 | 改名為 `installer/` |
+| **修正反而製造新 bug** | 我在 un() 先把 sys.stdout 換成擷取緩衝，之後 default_argv 又重新偵測「是不是視窗版本」——此時串流已非 None，於是判定為主控台版本，雙擊又回到文字選單 | 偵測一次、把結果傳進去（default_argv(..., windowed=...)），並加上直接驗證「呼叫時序」的測試 |
+| **測試自己造成失敗** | smoke test 用 Popen(stdout=DEVNULL, stderr=DEVNULL) 啟動視窗版本。**提供這些 handle 會改變程式行為**：GUI 子系統行程原本 sys.stdout is None，被重導向後有了合法串流，就不再認為自己是視窗版本，於是開文字選單並以代碼 2 結束。測試在對一個正常的建置回報失敗 | 改用 os.startfile（shell 的 open 動詞，等同雙擊），並加上測試防止有人改回去 |
+| **視窗比對抓到 Explorer** | 用標題子字串比對 bpull，結果比對到標題為 bpull - File Explorer 的檔案總管視窗——測試在看著錯誤的視窗卻回報通過 | 改為比對「擁有該視窗的行程映像檔路徑」 |
+| **修正反而製造新 bug** | 我在 `run()` 先把 `sys.stdout` 換成擷取緩衝，之後 `default_argv` 又重新偵測「是不是視窗版本」——此時串流已非 `None`，於是判定為主控台版本，雙擊又回到文字選單 | 偵測一次、把結果傳進去（`default_argv(..., windowed=...)`），並加上直接驗證「呼叫時序」的測試 |
+| **測試自己造成失敗** | smoke test 用 `Popen(stdout=DEVNULL, stderr=DEVNULL)` 啟動視窗版本。**提供這些 handle 會改變程式行為**：GUI 子系統行程原本 `sys.stdout is None`，被重導向後有了合法串流，就不再認為自己是視窗版本，於是開文字選單並以代碼 2 結束。測試對一個正常的建置回報失敗 | 改用 `os.startfile`（shell 的 open 動詞，等同雙擊），並加上測試防止有人改回去 |
+| **視窗比對抓到 Explorer** | 用標題子字串比對 `bbpull`，結果比對到標題為 `bbpull - File Explorer` 的檔案總管視窗——測試看著錯誤的視窗卻回報通過 | 改為比對「擁有該視窗的行程映像檔路徑」 |
 | **機密掃描閘門本身失效** | 第一版在乾淨的樹上報了 **180 筆**假警報（`BB_OUT_DIR=output` 讓每個 docstring 都命中；`password: str = ""` 等程式碼也被當成硬編碼密碼）——100% 誤報率等於沒有閘門 | 規則收窄成「精確 token 形狀」「只有名稱含 PASSWORD/SECRET/TOKEN 的 .env 值」「必須是引號字串常值」；並補上**正控制組**（種入假密碼必須被抓到）與負控制組測試 || **截圖看到舊畫面** | GDI 螢幕抓取在被遮擋時回傳過期像素（Windows 不會重繪被遮住的視窗），害我一度誤判版面壞掉 | 改用 `QWidget.grab()` 由 Qt 同步渲染，影像必定對應真實狀態 |
 | **delegate 繪製中途崩潰** | `self.parent()` 是視窗不是 view，拿它找 model 觸發 `AttributeError`，而且發生在 `painter.save()` 與 `restore()` 之間，導致 painter 狀態失衡 | 把 node 直接傳進繪製函式，不再往上找 widget 樹 |
 | **`Animator.after()` token 不可雜湊** | 用 dict 當 token 放進 set → `TypeError: unhashable type: 'dict'` | 改用 `OneShot` 類別 |

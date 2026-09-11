@@ -213,16 +213,219 @@ class FrozenPathTests(unittest.TestCase):
         self.assertNotIn("--create", text)
 
 
+class WindowedEntryPointTests(unittest.TestCase):
+    """The double-click path, which the first release got wrong.
+
+    `bbpull-gui.exe` built and "worked" under test because the test passed `gui`
+    explicitly. Double-clicking passes no arguments, so the CLI opened the
+    interactive text menu, which a console-less process cannot run: the released
+    executable exited after two seconds with code 2 and no message.
+    """
+
+    def setUp(self):
+        from bbpull import __main__ as entry
+
+        self.entry = entry
+        self._saved = entry.is_windowed_build
+
+    def tearDown(self):
+        self.entry.is_windowed_build = self._saved
+
+    def _windowed(self, value):
+        self.entry.is_windowed_build = lambda: value
+
+    def test_bare_double_click_opens_the_gui(self):
+        self._windowed(True)
+        self.assertEqual(self.entry.default_argv([]), ["gui"])
+
+    def test_explicit_arguments_are_untouched(self):
+        self._windowed(True)
+        self.assertEqual(self.entry.default_argv(["pull", "--course-id", "_1_1"]),
+                         ["pull", "--course-id", "_1_1"])
+
+    def test_run_detects_windowed_before_replacing_the_streams(self):
+        """Regression for the bug the first fix introduced.
+
+        `run()` swaps the streams for a capture buffer. If `default_argv` then
+        re-detects from `sys.stdout is None`, it sees the buffer and concludes
+        "console build", sending a double-click back to the text menu. The flag
+        must be computed once, before the swap.
+        """
+        entry = self.entry
+        seen = {}
+
+        saved = (entry.is_windowed_build, entry.default_argv, entry.main,
+                 entry.sys.argv, entry.sys.stdout, entry.sys.stderr)
+
+        def fake_default_argv(argv, windowed=None):
+            seen["windowed_arg"] = windowed
+            seen["stdout_at_call"] = entry.sys.stdout
+            return ["gui"]
+
+        try:
+            entry.is_windowed_build = lambda: True
+            entry.default_argv = fake_default_argv
+            entry.main = lambda argv: 0
+            entry.sys.argv = ["bbpull-gui.exe"]
+            entry.sys.stdout = None
+            entry.sys.stderr = None
+            code = entry.run()
+        finally:
+            (entry.is_windowed_build, entry.default_argv, entry.main,
+             entry.sys.argv, entry.sys.stdout, entry.sys.stderr) = saved
+
+        self.assertEqual(code, 0)
+        self.assertIs(seen.get("windowed_arg"), True,
+                      "the windowed flag must be passed in, not re-detected")
+        self.assertIsNotNone(seen.get("stdout_at_call"),
+                             "the swap happened before default_argv was called")
+
+    def test_double_click_failure_is_reported(self):
+        """`main` returns a code rather than raising, so an exception-only
+        handler missed the silent crash entirely."""
+        entry = self.entry
+        reported = []
+        saved = (entry.is_windowed_build, entry.default_argv, entry.main,
+                 entry.report_failure, entry.sys.argv, entry.sys.stdout,
+                 entry.sys.stderr)
+        try:
+            entry.is_windowed_build = lambda: True
+            entry.default_argv = lambda argv, windowed=None: ["gui"]
+            entry.main = lambda argv: 2
+            entry.report_failure = lambda output, code: reported.append(code)
+            entry.sys.argv = ["bbpull-gui.exe"]
+            entry.sys.stdout = None
+            entry.sys.stderr = None
+            code = entry.run()
+        finally:
+            (entry.is_windowed_build, entry.default_argv, entry.main,
+             entry.report_failure, entry.sys.argv, entry.sys.stdout,
+             entry.sys.stderr) = saved
+
+        self.assertEqual(code, 2)
+        self.assertEqual(reported, [2], "the user must be told, not left guessing")
+
+    def test_cli_invocation_is_not_reported_as_a_crash(self):
+        """`bbpull-gui.exe pull ...` returning 5 is a result, not a startup failure."""
+        entry = self.entry
+        reported = []
+        saved = (entry.is_windowed_build, entry.default_argv, entry.main,
+                 entry.report_failure, entry.sys.argv, entry.sys.stdout,
+                 entry.sys.stderr)
+        try:
+            entry.is_windowed_build = lambda: True
+            entry.default_argv = lambda argv, windowed=None: list(argv)
+            entry.main = lambda argv: 5
+            entry.report_failure = lambda output, code: reported.append(code)
+            entry.sys.argv = ["bbpull-gui.exe", "pull", "--course-id", "_1_1"]
+            entry.sys.stdout = None
+            entry.sys.stderr = None
+            code = entry.run()
+        finally:
+            (entry.is_windowed_build, entry.default_argv, entry.main,
+             entry.report_failure, entry.sys.argv, entry.sys.stdout,
+             entry.sys.stderr) = saved
+
+        self.assertEqual(code, 5)
+        self.assertEqual(reported, [], "an explicit command must not pop a dialog")
+
+    def test_default_argv_falls_back_to_detection(self):
+        self._windowed(True)
+        self.assertEqual(self.entry.default_argv([]), ["gui"])
+        self._windowed(False)
+        self.assertEqual(self.entry.default_argv([]), [])
+
+    def test_console_build_keeps_the_menu_default(self):
+        """A console build with no arguments should show the menu, not a window."""
+        self._windowed(False)
+        self.assertEqual(self.entry.default_argv([]), [])
+
+    def test_help_is_never_redirected(self):
+        self._windowed(True)
+        self.assertEqual(self.entry.default_argv(["--help"]), ["--help"])
+        self.assertEqual(self.entry.default_argv(["venv"]), ["venv"])
+
+    def test_failure_is_reported_not_swallowed(self):
+        """A windowed failure must reach the user, with output captured."""
+        from bbpull import __main__ as entry
+
+        shown = []
+        saved_log = entry.write_error_log
+        saved_box = entry.show_message
+        entry.write_error_log = lambda text: "C:\\logs\\bbpull-error.log"
+        entry.show_message = lambda title, text, error=True: shown.append(text) or True
+        try:
+            entry.report_failure("line one\nline two\n", 2)
+        finally:
+            entry.write_error_log = saved_log
+            entry.show_message = saved_box
+        self.assertTrue(shown, "the user must see something")
+        self.assertIn("line two", shown[0])
+        self.assertIn("bbpull-error.log", shown[0])
+
+    def test_capture_stream_reports_utf8(self):
+        """Without an `encoding`, the logging helpers degrade to ASCII and mangle
+        Chinese in the captured report."""
+        capture = self.entry._Capture()
+        capture.write("獨立執行檔模式")
+        self.assertEqual(capture.encoding, "utf-8")
+        self.assertIn("獨立執行檔模式", capture.getvalue())
+
+    def test_capture_survives_reconfigure(self):
+        """cli.main() reconfigures the console streams; the stand-in must not blow up."""
+        capture = self.entry._Capture()
+        try:
+            capture.reconfigure(errors="replace")
+        except (ValueError, OSError, AttributeError):
+            pass  # configure_console_streams tolerates exactly these
+
+
 class BuildToolTests(unittest.TestCase):
     def test_build_script_compiles(self):
         path = ROOT / "tools" / "build_exe.py"
         compile(path.read_text(encoding="utf-8"), str(path), "exec")
 
-    def test_window_detection_matches_by_title_not_pid(self):
-        """The spawned pid is the bootloader; the GUI lives in a child process."""
+    def test_window_detection_verifies_the_owning_executable(self):
+        """Matching by title alone produced a false positive.
+
+        A File Explorer window showing the folder `dist/bbpull` is titled
+        "bbpull - File Explorer", which matched a naive substring check: the
+        smoke test passed while looking at the wrong window. The check must
+        confirm the owning process is the executable under test.
+        """
         source = (ROOT / "tools" / "build_exe.py").read_text(encoding="utf-8")
-        self.assertIn("def window_titles(", source)
+        self.assertIn("def windows_for_executable(", source)
+        self.assertIn("_process_image", source)
         self.assertNotIn("window_title_for_pid", source)
+
+    def test_windowed_check_mimics_a_double_click(self):
+        """`Popen(stdout=DEVNULL)` changes the child's behaviour.
+
+        Supplying those handles means a GUI-subsystem process no longer sees
+        `sys.stdout is None`, so it stops identifying as windowed and opens the
+        text menu instead - the test caused the very failure it reported.
+        `os.startfile` is the shell "open" verb, i.e. a real double-click.
+
+        The docstring is excluded before checking: it explains the old DEVNULL
+        approach, and matching that text would make this test assert the
+        opposite of what it means to.
+        """
+        import ast
+
+        source = (ROOT / "tools" / "build_exe.py").read_text(encoding="utf-8")
+        body = None
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.FunctionDef) and node.name == "verify_windowed_gui":
+                statements = list(node.body)
+                first = statements[0] if statements else None
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                    statements = statements[1:]          # drop the docstring
+                body = "\n".join(ast.unparse(item) for item in statements)
+                break
+        self.assertIsNotNone(body, "verify_windowed_gui not found")
+        self.assertIn("os.startfile", body)
+        self.assertNotIn("DEVNULL", body,
+                         "redirecting stdio changes the program under test")
 
     def test_build_kills_leftovers_before_clearing_dist(self):
         """Windows refuses to delete a running .exe, failing the build mid-COLLECT."""

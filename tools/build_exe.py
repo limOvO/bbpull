@@ -109,20 +109,45 @@ def build():
         raise SystemExit(f"bbpull.exe was not produced in {APP_DIR}")
 
 
-def window_titles(needle):
-    """Visible window titles containing `needle`.
+def _process_image(pid):
+    """Full executable path of a process, or "" if it cannot be read."""
+    import ctypes
 
-    Matching is by title rather than by pid on purpose: PyInstaller's bootloader
-    runs the app in a *child* process, so the pid returned by `Popen` owns only
-    hidden bootloader windows ("PyInstaller Onefile Hidden Window"). Matching the
-    spawned pid therefore never finds the GUI, and would report a working build
-    as broken.
+    process_query_limited_information = 0x1000
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return ""
+    try:
+        size = ctypes.c_uint32(2048)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buffer,
+                                               ctypes.byref(size)):
+            return buffer.value
+        return ""
+    except OSError:
+        return ""
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def windows_for_executable(exe_path):
+    """Visible window titles owned by a process running `exe_path`.
+
+    Matching on the title alone is not enough: a File Explorer window showing the
+    folder `dist/bbpull` is titled "bbpull - File Explorer" and matched a naive
+    substring check, so the smoke test passed while looking at the wrong window
+    entirely. The owning process's image path removes that ambiguity.
+
+    The process is not necessarily the one `Popen` returned: PyInstaller's
+    bootloader runs the application in a child, so every window is checked.
     """
     import ctypes
-    import ctypes.wintypes as wintypes
 
     user32 = ctypes.windll.user32
+    target = os.path.normcase(os.path.abspath(exe_path))
     titles = []
+    seen = {}
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def callback(hwnd, _lparam):
@@ -131,9 +156,16 @@ def window_titles(needle):
         length = user32.GetWindowTextLengthW(hwnd)
         if not length:
             return True
+        owner = ctypes.c_uint32()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        pid = owner.value
+        if pid not in seen:
+            seen[pid] = os.path.normcase(_process_image(pid))
+        if seen[pid] != target:
+            return True
         buffer = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buffer, length + 1)
-        if needle.lower() in buffer.value.lower():
+        if buffer.value:
             titles.append(buffer.value)
         return True
 
@@ -149,49 +181,56 @@ def kill_tree(image_name):
 
 
 def verify_windowed_gui(gui, failures):
-    """The windowed binary must open an actual window.
+    """The windowed binary must open a window **when double-clicked**.
 
-    "The process is still alive" is not evidence: a failed import makes
-    PyInstaller show a modal error dialog, which also keeps the process running.
-    Only a real window title counts.
+    Launched through `os.startfile`, which is the shell "open" verb - literally
+    what a double-click does. That fidelity matters: the earlier version used
+    `subprocess.Popen(..., stdout=DEVNULL, stderr=DEVNULL)`, and supplying those
+    handles changes the program's behaviour. A GUI-subsystem process normally has
+    `sys.stdout is None`; redirected to DEVNULL it has a valid (useless) stream,
+    so it no longer identifies itself as windowed, falls through to the
+    interactive text menu, and exits with code 2. The test was causing the
+    failure it reported, and reported it against a working build.
+
+    "The process is still alive" is not evidence either: a failed import makes
+    PyInstaller show a modal error dialog, which also keeps it running. Only a
+    window owned by this executable counts.
     """
+    if os.name != "nt":
+        print("  skip windowed gui check (os.startfile is Windows-only)")
+        return
+
     kill_tree(gui.name)
     time.sleep(1.0)
     try:
-        proc = subprocess.Popen([str(gui), "gui"],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
+        os.startfile(str(gui))  # noqa: S606 - the point is to mimic a double-click
     except OSError as exc:
-        print(f"  FAIL windowed gui could not start: {exc}")
+        print(f"  FAIL windowed gui could not be started: {exc}")
         failures.append("windowed gui")
         return
 
     title = ""
-    try:
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                print(f"  FAIL windowed gui exited early ({proc.returncode})")
-                failures.append("windowed gui")
-                return
-            found = window_titles("bbpull")
-            if found:
-                title = found[0]
-                break
-            time.sleep(0.5)
-    finally:
-        kill_tree(gui.name)
-        if proc.poll() is None:
-            proc.kill()
-            try:
-                proc.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                pass
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        found = windows_for_executable(gui)
+        if found:
+            title = found[0]
+            break
+        time.sleep(0.5)
+
+    running = bool(subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {gui.name}"],
+                                  capture_output=True, text=True).stdout.find(
+                                      gui.name) >= 0)
+    kill_tree(gui.name)
 
     if title:
-        print(f"  ok   windowed gui opened a window: {title!r}")
+        print(f"  ok   windowed gui opened a window on double-click: {title!r}")
+    elif not running:
+        print("  FAIL windowed gui (double-click, no args) exited without "
+              "opening a window")
+        failures.append("windowed gui")
     else:
-        print("  FAIL windowed gui opened no window in 60s")
+        print("  FAIL windowed gui is running but opened no window in 60s")
         failures.append("windowed gui")
 
 
