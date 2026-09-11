@@ -327,28 +327,52 @@ class QtPerformanceTests(unittest.TestCase):
         self.assertEqual(len(widgets), 0, "the model must not own widgets")
         self.assertEqual(model.rowCount(), 2000)
 
-    def test_scrolling_a_long_list_stays_cheap(self):
+    def test_scrolling_cost_does_not_scale_with_row_count(self):
+        """The property that matters: cost is flat in the number of rows.
+
+        Timed as a *ratio*, not an absolute budget. An absolute bound measures the
+        machine and whatever else shares the process as much as the code: the
+        earlier version of this test asserted "< 3 s for 3,000 rows" and began
+        failing at ~11.5 s once neighbouring Qt tests changed the process state.
+        Ten times the rows costing about the same per scroll step is the actual
+        claim, and it holds regardless of how fast the machine is.
+        """
         from bbpull.catalog import Catalog
         from PySide6.QtWidgets import QListView
 
-        view = QListView()
-        model = models.CatalogModel()
-        model.setCatalog = None  # guard against accidental API misuse
-        model.set_catalog(Catalog("_1_1", "Perf", "http://x", flat_tree(3000)))
-        model.set_folder("root")
-        delegate = delegates.RowDelegate(theme.Palette("dark"), view)
-        view.setModel(model)
-        view.setItemDelegate(delegate)
-        view.setUniformItemSizes(True)
-        view.resize(800, 600)
-
-        start = time.perf_counter()
-        for value in range(0, 3000, 60):
-            view.verticalScrollBar().setValue(value)
+        def per_step_ms(rows, steps=40):
+            view = QListView()
+            view.setUniformItemSizes(True)
+            view.resize(800, 600)
+            model = models.CatalogModel()
+            model.set_catalog(Catalog("_1_1", "Perf", "http://x", flat_tree(rows)))
+            model.set_folder("root")
+            view.setModel(model)
+            view.setItemDelegate(delegates.RowDelegate(theme.Palette("dark"), view))
+            view.show()
             _app.processEvents()
-        elapsed = (time.perf_counter() - start) * 1000
-        self.assertLess(elapsed, 3000, f"scrolling 3,000 rows took {elapsed:.0f} ms")
-        view.deleteLater()
+
+            stride = max(1, rows // steps)
+            positions = list(range(0, rows, stride))
+            start = time.perf_counter()
+            for value in positions:
+                view.verticalScrollBar().setValue(value)
+                _app.processEvents()
+            elapsed = (time.perf_counter() - start) * 1000
+
+            view.hide()
+            view.deleteLater()
+            _app.processEvents()
+            return elapsed / max(1, len(positions))
+
+        small = per_step_ms(300)
+        large = per_step_ms(3000)
+
+        self.assertLess(large, max(small, 0.5) * 4,
+                        f"scrolling slowed down with more rows: {small:.2f} ms/step "
+                        f"at 300 rows vs {large:.2f} ms/step at 3,000 rows")
+        self.assertLess(large, 150,
+                        f"{large:.2f} ms per scroll step is not virtualised")
 
 
 @unittest.skipUnless(HAS_QT and QT_ENABLED, "Qt tests are opt-in (see module docstring)")
@@ -564,6 +588,289 @@ class WrapLinesTests(unittest.TestCase):
         total = tfm.height() + 1 + mfm.height()
         self.assertLessEqual(total, text_rect.height() + 1,
                              "both text lines must fit inside the row")
+
+
+@unittest.skipUnless(HAS_QT and QT_ENABLED, "Qt tests are opt-in (see module docstring)")
+class ConnectDialogSubmitTests(unittest.TestCase):
+    """Pressing 登入 must actually work.
+
+    It did not: `_submit_connect` imported `..gui.wizard`, which does not exist
+    (the module is `bbpull.wizard`), so the shipped executable answered a login
+    attempt with `No module named 'bbpull.gui.wizard'`. Nothing caught it because
+    the import is deferred inside the handler and no test ever submitted the
+    dialog.
+
+    These run the handler with a fake session and a temporary `.env`, so every
+    save mode is exercised without touching the network or the real config.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        from bbpull.config import load_config
+        from bbpull.gui_qt import window as qt_window
+
+        self.qt_window = qt_window
+        self.tmp = tempfile.TemporaryDirectory()
+        cfg = load_config(None)
+        cfg.username = "tester"
+        cfg.password = "test-old-password"
+        cfg.env_file = os.path.join(self.tmp.name, ".env")
+        cfg.state_dir = os.path.join(self.tmp.name, "state")
+        os.makedirs(cfg.state_dir, exist_ok=True)
+        self.cfg = cfg
+
+        self.session_calls = []
+        self._saved_session = qt_window.LearnSession
+
+        # Bind the shared list to a local name: inside the fake, `self` is the
+        # fake session, so `self.session_calls.append(...)` would quietly create
+        # an attribute on it and leave the test's list empty. That mistake made
+        # the first version of this test assert nothing.
+        calls = self.session_calls
+
+        class FakeSession:
+            def __init__(self, config, log=None):
+                self.config = config
+                self.log = log
+
+            def login(self, force=False):
+                calls.append(force)
+                return True
+
+        qt_window.LearnSession = FakeSession
+
+        self.app = qt_window.BbpullApp if hasattr(qt_window, "BbpullApp") else None
+        self.win = qt_window.MainWindow(cfg, lambda *a: None)
+        self.win.hide()
+
+        # Run "background" work inline so the test is deterministic.
+        class InlineTasks:
+            def start(inner, fn, on_ok, on_fail=None, *args, **kwargs):
+                try:
+                    result = fn()
+                except Exception as exc:  # noqa: BLE001
+                    if on_fail:
+                        on_fail(str(exc))
+                    return None
+                if on_ok:
+                    on_ok(result)
+                return None
+
+            def cancel_all(inner):
+                pass
+
+        self.win.tasks = InlineTasks()
+
+        self.logged_in = []
+        self.win._on_login = lambda session: self.logged_in.append(session)
+
+    def tearDown(self):
+        self.qt_window.LearnSession = self._saved_session
+        try:
+            self.win._shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        self.tmp.cleanup()
+
+    def _dialog(self, save_mode, password="test-new-password"):
+        """A dialog wired exactly as `open_connect()` wires it.
+
+        `on_submit` is connected so `_submit()` - the real 登入 button handler,
+        including its validation - can be exercised rather than calling the
+        window's handler directly and skipping the checks in between.
+        """
+        dialog = self.qt_window.ConnectDialog(self.cfg, self.win,
+                                              on_submit=self.win._submit_connect)
+        dialog.base_url.setText("https://twc.blackboard.com")
+        dialog.username.setText("23002220")
+        dialog.password.setText(password)
+        dialog.save_mode.setCurrentText(save_mode)
+        return dialog
+
+    def test_submit_does_not_raise_a_missing_module(self):
+        """The exact regression: the handler must import what exists."""
+        dialog = self._dialog("不要儲存")
+        dialog._submit()                          # must not raise
+        self.assertTrue(self.session_calls, "login was never attempted")
+
+    def test_every_save_mode_works(self):
+        for mode in ("加密儲存（推薦）", "存進 .env（明文）", "不要儲存", "維持現狀"):
+            with self.subTest(mode=mode):
+                dialog = self._dialog(mode)
+                dialog._submit()
+                self.assertEqual(dialog.values()["save"],
+                                 {"加密儲存（推薦）": "secure", "存進 .env（明文）": "env",
+                                  "不要儲存": "none", "維持現狀": "keep"}[mode])
+        self.assertTrue(self.session_calls, "no save mode reached the login call")
+
+    def test_env_mode_writes_the_file(self):
+        dialog = self._dialog("存進 .env（明文）")
+        dialog._submit()
+        self.assertTrue(os.path.isfile(self.cfg.env_file),
+                        "the .env file should have been written")
+        text = open(self.cfg.env_file, encoding="utf-8").read()
+        self.assertIn("BB_USERNAME", text)
+
+    def test_login_is_forced_on_submit(self):
+        """Credentials just changed, so a cached session must not be reused."""
+        self._dialog("不要儲存")._submit()
+        self.assertEqual(self.session_calls, [True])
+
+    def test_empty_password_is_rejected_before_the_network(self):
+        dialog = self._dialog("不要儲存", password="")
+        dialog._submit()
+        self.assertEqual(self.session_calls, [],
+                         "an empty password must not reach the network")
+        self.assertTrue(dialog.error.text(), "the dialog should say what is wrong")
+
+    def test_failure_is_shown_in_the_dialog(self):
+        """A bad password should say so in the dialog, not vanish."""
+        original = self.qt_window.LearnSession
+
+        class Failing:
+            def __init__(self, config, log=None):
+                pass
+
+            def login(self, force=False):
+                raise RuntimeError("invalid credentials")
+
+        self.qt_window.LearnSession = Failing
+        try:
+            dialog = self._dialog("不要儲存")
+            dialog._submit()
+        finally:
+            self.qt_window.LearnSession = original
+        self.assertIn("invalid credentials", dialog.error.text())
+
+
+@unittest.skipUnless(HAS_QT and QT_ENABLED, "Qt tests are opt-in (see module docstring)")
+class DelegatePaintTests(unittest.TestCase):
+    """Paint every row kind for real.
+
+    A shipped bug motivated this: `theme.draw_icon` passed a `QColor` into
+    `blend()`, which expected a hex string, so the `document` branch raised
+    `AttributeError: 'QColor' object has no attribute 'lstrip'`. Because Qt
+    swallows exceptions raised inside `QStyledItemDelegate.paint`, the app kept
+    running and simply drew nothing - and since the icon is painted before the
+    title, meta text and buttons, an entire document row came out blank.
+
+    Nothing caught it: no test called `paint()`, and the course used for manual
+    screenshots happened to have no plain documents at its root.
+
+    These call `paint()` **directly**, so an exception propagates into the test
+    instead of disappearing into Qt's event loop.
+    """
+
+    KINDS = ("folder", "document", "file", "link", "assessment", "tool",
+             "announcement", "other")
+
+    def _node(self, kind):
+        return {
+            "id": f"n-{kind}", "title": f"項目 {kind}", "kind": kind,
+            "handler": "resource/x-bb-document", "itemCount": 2, "childCount": 0,
+            "downloadable": True, "hasBody": True, "synthetic": False,
+            "children": [],
+        }
+
+    def setUp(self):
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QPainter, QPixmap
+
+        self.pal = theme.Palette("dark")
+        self.rect = QRect(0, 0, 800, delegates.ROW_HEIGHT)
+        self.pixmap = QPixmap(800, delegates.ROW_HEIGHT)
+        self.pixmap.fill(Qt.black)
+        self.painter = QPainter(self.pixmap)
+
+    def tearDown(self):
+        self.painter.end()
+
+    def _paint(self, delegate, node, selected=False, implied=False):
+        """Invoke the delegate's paint directly so errors surface."""
+        from PySide6.QtGui import QStandardItem, QStandardItemModel
+        from PySide6.QtWidgets import QStyleOptionViewItem
+
+        model = QStandardItemModel()
+        model.appendRow(QStandardItem("row"))
+        index = model.index(0, 0)
+        model.setData(index, node, models.NodeRole)
+        model.setData(index, selected, models.SelectedRole)
+        model.setData(index, implied, models.ImpliedRole)
+        model.setData(index, False, models.HoverRole)
+
+        option = QStyleOptionViewItem()
+        option.rect = self.rect
+        delegate.paint(self.painter, option, index)
+
+    def test_every_content_kind_paints(self):
+        delegate = delegates.RowDelegate(self.pal, None)
+        for kind in self.KINDS:
+            with self.subTest(kind=kind):
+                self._paint(delegate, self._node(kind))
+
+    def test_every_kind_paints_when_selected_and_hovered(self):
+        delegate = delegates.RowDelegate(self.pal, None)
+        for kind in self.KINDS:
+            with self.subTest(kind=kind):
+                self.pixmap.fill(Qt.black)
+                self._paint(delegate, self._node(kind), selected=True)
+
+    def test_painting_actually_draws_something(self):
+        """A swallowed exception leaves the pixmap untouched, so assert on pixels."""
+        delegate = delegates.RowDelegate(self.pal, None)
+        self.pixmap.fill(Qt.black)
+        self._paint(delegate, self._node("document"))
+        image = self.pixmap.toImage()
+        drawn = 0
+        for y in range(0, image.height(), 2):
+            for x in range(0, image.width(), 4):
+                colour = image.pixelColor(x, y)
+                if colour.red() + colour.green() + colour.blue() > 90:
+                    drawn += 1
+        self.assertGreater(drawn, 40,
+                           "a document row must draw its icon, title and buttons")
+
+    def test_course_card_paints_for_every_meta_shape(self):
+        """Matches the name shapes in the live account, including 403 names."""
+        from bbpull.gui.courses import parse_courses
+        from PySide6.QtGui import QStandardItem, QStandardItemModel
+        from PySide6.QtWidgets import QStyleOptionViewItem
+
+        metas = parse_courses([
+            {"courseId": "_1_1", "name": "[2026/27-1] NUR2051/NUR2046 Nursing "
+                                         "Practicum I (NY2023)"},
+            {"courseId": "_2_1", "name": "Library"},
+            {"courseId": "_3_1", "name": "[2023/24] Year only"},
+            {"courseId": "_4_1", "name": ""},
+        ])
+        delegate = delegates.CourseDelegate(self.pal, None, on_click=lambda _c: None)
+        for meta in metas:
+            with self.subTest(course=meta.course_id):
+                model = QStandardItemModel()
+                model.appendRow(QStandardItem("card"))
+                index = model.index(0, 0)
+                model.setData(index, meta, models.NodeRole)
+                model.setData(index, True, models.SelectedRole)
+                option = QStyleOptionViewItem()
+                option.rect = self.rect
+                delegate.paint(self.painter, option, index)
+
+    def test_blend_accepts_a_qcolor(self):
+        """The exact type error that caused the blank rows."""
+        from PySide6.QtGui import QColor
+
+        from bbpull.palette import blend
+
+        self.assertEqual(blend("#ffffff", "#000000", 0.5), "#808080")
+        self.assertEqual(blend(QColor("#ffffff"), QColor("#000000"), 0.5), "#808080")
+        self.assertEqual(blend("#ffffff", QColor("#000000"), 0.5), "#808080")
+
+    def test_blend_is_tolerant_of_junk(self):
+        from bbpull.palette import blend
+
+        self.assertTrue(blend(None, None, 0.5).startswith("#"))
+        self.assertTrue(blend("nonsense", "#123456", 0.5).startswith("#"))
 
 
 if __name__ == "__main__":

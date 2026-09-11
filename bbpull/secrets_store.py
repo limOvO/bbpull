@@ -97,6 +97,26 @@ def available_backend():
     return BACKEND_KEYRING
 
 
+def _keyring():
+    """Import `keyring`, with an actionable error when it is missing.
+
+    The backend is only ever set to `keyring` after `available_backend()`
+    imported it successfully, so reaching these calls without the package means
+    the environment changed underneath a running program. A bare
+    `ModuleNotFoundError` from deep inside encryption is a bad way to learn that;
+    this says what happened and what to do.
+    """
+    try:
+        import keyring
+    except ImportError as exc:
+        raise ConfigError(
+            "這個環境原本用 keyring 儲存密碼，但現在找不到 keyring。"
+            "請執行 `python -m pip install keyring`，"
+            "或用 `bbpull secure` 重新設定密碼儲存方式。"
+        ) from exc
+    return keyring
+
+
 def backend_description(backend=None):
     backend = backend or available_backend()
     return {
@@ -123,8 +143,7 @@ class SecretStore:
         if self.backend == BACKEND_DPAPI:
             return base64.b64encode(dpapi_protect(text)).decode("ascii"), BACKEND_DPAPI
         if self.backend == BACKEND_KEYRING:
-            import keyring
-
+            keyring = _keyring()
             keyring.set_password(KEYRING_SERVICE, "credentials", text)
             return None, BACKEND_KEYRING
         return base64.b64encode(text.encode("utf-8")).decode("ascii"), BACKEND_PLAIN
@@ -133,8 +152,7 @@ class SecretStore:
         if backend == BACKEND_DPAPI:
             return json.loads(dpapi_unprotect(base64.b64decode(data)))
         if backend == BACKEND_KEYRING:
-            import keyring
-
+            keyring = _keyring()
             text = keyring.get_password(KEYRING_SERVICE, "credentials")
             return json.loads(text) if text else {}
         return json.loads(base64.b64decode(data).decode("utf-8"))

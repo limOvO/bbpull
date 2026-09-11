@@ -45,6 +45,24 @@ HIDDEN = [
     "bbpull.gui_qt.theme",
     "bbpull.gui_qt.workers",
     "bbpull.gui_qt.inspect",
+    # Imported inside the connect dialog's submit handler rather than at module
+    # load, so it only runs when someone actually logs in - which is why a wrong
+    # path here reached users as "No module named 'bbpull.gui.wizard'".
+    "bbpull.wizard",
+    "bbpull.healthcheck",
+    "bbpull.gui_select",
+    "bbpull.venv_tools",
+    # Also reached from inside functions. They are imported at module level
+    # elsewhere, so the analyser would find them anyway - but naming them makes
+    # the requirement explicit and a test keeps the two lists in step, because
+    # the cost of missing one is a broken release, not a warning.
+    "bbpull.announcements",
+    "bbpull.cli",
+    "bbpull.config",
+    "bbpull.course",
+    "bbpull.palette",
+    "bbpull.paths",
+    "bbpull.session",
     "tools.secret_scan",
     "customtkinter",
 ]

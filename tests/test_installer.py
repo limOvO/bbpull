@@ -125,8 +125,43 @@ class SpecTests(unittest.TestCase):
 
     def test_dynamic_imports_are_declared_as_hidden(self):
         for module in ("bbpull.gui_qt.window", "bbpull.gui.app", "tools.secret_scan",
-                       "customtkinter"):
+                       "customtkinter", "bbpull.wizard", "bbpull.healthcheck"):
             self.assertIn(module, self.source, f"{module} must be a hidden import")
+
+    def test_deferred_internal_imports_are_declared_as_hidden(self):
+        """Anything imported inside a function must be named to PyInstaller.
+
+        The v0.1.1 failure was a deferred import with a wrong path. Even with the
+        path right, a module reached only from inside a function is the easiest
+        thing for a bundler to miss, so the two lists are reconciled here rather
+        than trusted to stay in step.
+        """
+        import ast
+
+        deferred = set()
+        for path in sorted((ROOT / "bbpull").rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            lines = path.read_text(encoding="utf-8").splitlines()
+            tree = ast.parse("\n".join(lines))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                if not lines[node.lineno - 1].startswith((" ", "\t")):
+                    continue                       # module level, already visible
+                if node.level == 0:
+                    continue                       # absolute, analyser sees it
+                package = ".".join(path.relative_to(ROOT).with_suffix("").parts[:-1])
+                keep = len(package.split(".")) - (node.level - 1)
+                base = package.split(".")[:max(0, keep)]
+                if node.module:
+                    base = base + node.module.split(".")
+                target = ".".join(base)
+                if target.startswith("bbpull"):
+                    deferred.add(target)
+        missing = sorted(module for module in deferred if module not in self.source)
+        self.assertEqual(missing, [],
+                         f"deferred imports absent from the spec's hidden list: {missing}")
 
 
 class HealthCheckTests(unittest.TestCase):

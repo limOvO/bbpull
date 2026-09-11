@@ -1331,7 +1331,7 @@ class MainWindow(QMainWindow):
 
         def work():
             from ..config import normalize_base_url
-            from ..gui.wizard import clear_env_password, env_value, update_env_file
+            from ..wizard import clear_env_password, env_value, update_env_file
 
             cfg = self.cfg
             if values["baseUrl"]:

@@ -107,21 +107,46 @@ KIND_LABELS = {
 }
 
 
+def _as_hex(value):
+    """Coerce a colour to `#rrggbb`.
+
+    Accepts a hex string or anything with a `name()` method (a `QColor`), via
+    duck typing so this module stays toolkit-free. Without it, passing a QColor
+    from the Qt delegate raised `AttributeError: 'QColor' object has no attribute
+    'lstrip'` - inside `QStyledItemDelegate.paint`, where Qt swallows the
+    exception and simply draws nothing.
+    """
+    if value is None:
+        return "#000000"
+    name = getattr(value, "name", None)
+    if callable(name):
+        try:
+            return name()
+        except Exception:  # noqa: BLE001
+            return "#000000"
+    return str(value)
+
+
 def blend(fg, bg, alpha):
     """Mix `fg` over `bg` at `alpha` and return an opaque hex colour.
 
     Needed because neither Tk nor a plain QSS rule can express partial alpha on
     every surface; computing the solid equivalent keeps both front-ends identical.
     """
-    fg = (fg or "#000000").lstrip("#")
-    bg = (bg or "#000000").lstrip("#")
+    fg_hex = _as_hex(fg)
+    bg_hex = _as_hex(bg)
+    fg_body = fg_hex.lstrip("#")
+    bg_body = bg_hex.lstrip("#")
     parts = []
     for i in (0, 2, 4):
         try:
-            f = int(fg[i:i + 2], 16)
-            b = int(bg[i:i + 2], 16)
+            f = int(fg_body[i:i + 2], 16)
+            b = int(bg_body[i:i + 2], 16)
         except ValueError:
-            return fg if fg.startswith("#") else "#000000"
+            # Unparseable input: fall back to the background, which is at least a
+            # valid colour. Returning the already-stripped body here produced a
+            # value without its leading `#`.
+            return bg_hex
         parts.append(int(round(f * alpha + b * (1 - alpha))))
     return "#%02x%02x%02x" % tuple(parts)
 
