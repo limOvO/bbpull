@@ -189,6 +189,34 @@ class HealthCheckTests(unittest.TestCase):
         self.assertTrue(any("boom" in line for line in lines),
                         "an exploding check must be reported, not swallowed")
 
+    def test_deferred_imports_are_verified(self):
+        """`selftest` must exercise the lazily-imported modules.
+
+        `bbpull.gui.wizard` shipped broken because the login dialog referenced it
+        lazily; a check that only imports module-level dependencies could never
+        have noticed, in either the source tree or the packaged build.
+        """
+        ok, lines = healthcheck._check_deferred_imports()
+        self.assertTrue(ok, "\n".join(lines))
+        for name, _label in healthcheck.DEFERRED_MODULES:
+            self.assertTrue(any(name in line for line in lines), name)
+
+    def test_deferred_check_catches_a_missing_module(self):
+        """The check must fail loudly, not report a green run."""
+        saved = healthcheck.DEFERRED_MODULES
+        healthcheck.DEFERRED_MODULES = saved + (("bbpull.gui.wizard", "gone"),)
+        try:
+            ok, lines = healthcheck._check_deferred_imports()
+        finally:
+            healthcheck.DEFERRED_MODULES = saved
+        self.assertFalse(ok)
+        self.assertTrue(any("bbpull.gui.wizard" in line and "FAIL" in line
+                            for line in lines), "\n".join(lines))
+
+    def test_run_checks_includes_the_deferred_imports(self):
+        _ok, lines = healthcheck.run_checks()
+        self.assertTrue(any("bbpull.wizard" in line for line in lines))
+
 
 class FrozenPathTests(unittest.TestCase):
     """A frozen build must not keep state inside the unpack directory."""

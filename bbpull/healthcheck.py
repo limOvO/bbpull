@@ -24,6 +24,38 @@ MODULES = (
     ("tkinter", "內建 tkinter", False),
 )
 
+#: Imported only from inside functions, so a bundling mistake stays invisible
+#: until the matching feature is used. `bbpull.gui.wizard` shipped broken for
+#: exactly that reason: it was referenced lazily by the login dialog and did not
+#: exist. Importing them here is the only way `selftest` can check a packaged
+#: build's import graph without opening a window.
+DEFERRED_MODULES = (
+    ("bbpull.wizard", "登入對話框（延遲匯入）"),
+    ("bbpull.gui_qt.inspect", "點擊檢查模式"),
+    ("bbpull.gui_qt.window", "Qt 主視窗"),
+    ("bbpull.gui_select", "GUI 引擎選擇"),
+    ("bbpull.venv_tools", "虛擬環境工具"),
+    ("bbpull.healthcheck", "自我檢查"),
+    ("bbpull.catalog", "瀏覽模型"),
+    ("bbpull.selective", "選擇性下載"),
+)
+
+
+def _check_deferred_imports():
+    """Every lazily-imported internal module must be importable."""
+    lines = []
+    ok = True
+    for name, label in DEFERRED_MODULES:
+        try:
+            importlib.import_module(name)
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            lines.append(f"  [FAIL] {label:22} {name} - "
+                         f"{type(exc).__name__}: {exc}")
+        else:
+            lines.append(f"  [ok]   {label:22} {name}")
+    return ok, lines
+
 
 def _check_modules():
     lines = []
@@ -154,8 +186,8 @@ def run_checks():
         "",
     ]
     results = []
-    for check in (_check_modules, _check_engine, _check_theme,
-                  _check_qt_platform, _check_write_access):
+    for check in (_check_modules, _check_deferred_imports, _check_engine,
+                  _check_theme, _check_qt_platform, _check_write_access):
         try:
             ok, lines = check()
         except Exception as exc:  # noqa: BLE001
