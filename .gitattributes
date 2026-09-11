@@ -1,0 +1,14 @@
+# Windows batch files must keep CRLF line endings.
+#
+# cmd.exe mis-executes a .bat that uses bare LF: it reads fragments of comment
+# lines as commands. Editing bbpull.cmd with a tool that normalises to LF broke
+# the launcher exactly that way, and it is not obvious from reading the file.
+# `core.autocrlf=true` on this machine would otherwise rewrite them on checkout.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Python sources stay LF.
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf

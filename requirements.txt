@@ -1,0 +1,8 @@
+requests>=2.31.0
+# Desktop GUI (preferred). Only Essentials is needed - QtWidgets is a core
+# module and the Addons wheel adds ~500 MB of WebEngine/3D for no benefit here.
+# Without it `bbpull gui` falls back to the built-in Tk interface.
+PySide6-Essentials>=6.6
+# Fallback desktop GUI. Only needed if PySide6 is unavailable, or with
+# `bbpull gui --tk`.
+customtkinter>=5.2.0
