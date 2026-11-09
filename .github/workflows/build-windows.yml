@@ -1,0 +1,62 @@
+name: build-windows
+
+# Builds the real Windows executables on a Windows runner (PyInstaller cannot
+# cross-compile). `tools/build_exe.py` runs its own smoke tests, including the
+# windowed double-click check, before the zip is uploaded.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 1.1.0"
+        required: true
+        default: "1.1.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build and verify
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          if (-not $version) {
+            $version = "${{ github.ref_name }}".TrimStart("v")
+          }
+          if (-not $version) { $version = "dev" }
+          Write-Host "building bbpull $version"
+          python tools/build_exe.py --version $version
+
+      - name: Show result
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -Filter *.zip | Format-Table Name, Length
+          Get-ChildItem dist/bbpull | Select-Object Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bbpull-windows
+          path: |
+            dist/bbpull-*-windows-x64.zip
+            dist/bbpull-*.sha256
+          if-no-files-found: error
