@@ -557,7 +557,23 @@ def tar_release(version="dev"):
     return target
 
 
+def _utf8_output():
+    """Make this script's own output UTF-8.
+
+    A stock Windows console uses cp1252; the GUI window title contains Chinese,
+    and printing it from the window check aborted the build **after** the
+    executables had already passed their smoke tests. Only the script's own
+    streams are reconfigured - subprocesses get PYTHONIOENCODING explicitly.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(argv=None):
+    _utf8_output()
     parser = argparse.ArgumentParser(
         description="Build the bbpull executables for this platform.")
     parser.add_argument("--no-zip", action="store_true")

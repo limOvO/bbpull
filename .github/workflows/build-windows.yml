@@ -37,6 +37,9 @@ jobs:
 
       - name: Build and verify
         shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: |
           $version = "${{ github.event.inputs.version }}"
           if (-not $version) {
@@ -56,7 +59,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bbpull-windows
-          path: |
-            dist/bbpull-*-windows-x64.zip
-            dist/bbpull-*.sha256
+          path: dist/bbpull-*-windows-x64.zip
           if-no-files-found: error
