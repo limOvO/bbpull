@@ -937,6 +937,9 @@ def build_parser():
     p_gui.add_argument("--smoke", action="store_true",
                        help="open the window, then close it automatically "
                             "(packaging self-check)")
+    p_gui.add_argument("--screenshot", default=None, metavar="PATH",
+                       help="render the window to PATH and exit "
+                            "(packaging self-check)")
     sub.add_parser("secure", parents=[common], help="move the password into encrypted storage")
     sub.add_parser("login", parents=[common], help="verify credentials and cache the session")
     p_courses = sub.add_parser("courses", parents=[common], help="list enrolled courses")
@@ -1070,7 +1073,8 @@ def cmd_gui(args, cfg, log):
             return run_qt(cfg, log,
                           inspect=bool(getattr(args, "inspect", False)),
                           inspect_dir=getattr(args, "inspect_dir", None),
-                          smoke=bool(getattr(args, "smoke", False)))
+                          smoke=bool(getattr(args, "smoke", False)),
+                          screenshot=getattr(args, "screenshot", None))
         except Exception as exc:  # noqa: BLE001
             # A Qt failure at runtime is reported, then Tk is offered - but it is
             # never swapped in without saying so.

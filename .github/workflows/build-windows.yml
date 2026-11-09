@@ -49,15 +49,36 @@ jobs:
           Write-Host "building bbpull $version"
           python tools/build_exe.py --version $version
 
+      - name: Render the GUI to a PNG
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: |
+          # Proves the packaged GUI paints, not merely that a window handle
+          # exists: the app renders its own widget tree into the file.
+          & "dist\bbpull\bbpull.exe" gui --screenshot "dist\gui-windows.png" --qt
+          if ($LASTEXITCODE -ne 0) {
+            throw "GUI screenshot run failed with exit code $LASTEXITCODE"
+          }
+          $shot = Get-Item "dist\gui-windows.png"
+          if ($shot.Length -lt 5000) {
+            throw "GUI screenshot is suspiciously small: $($shot.Length) bytes"
+          }
+          Write-Host "windows GUI rendered: $($shot.Length) bytes"
+
       - name: Show result
         shell: pwsh
         run: |
           Get-ChildItem dist -Filter *.zip | Format-Table Name, Length
+          Get-ChildItem dist/gui-windows.png | Format-Table Name, Length
           Get-ChildItem dist/bbpull | Select-Object Name, Length
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bbpull-windows
-          path: dist/bbpull-*-windows-x64.zip
+          path: |
+            dist/bbpull-*-windows-x64.zip
+            dist/gui-windows.png
           if-no-files-found: error

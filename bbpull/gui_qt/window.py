@@ -1627,7 +1627,8 @@ def _human_bytes(num):
     return f"{value:.1f} GB"
 
 
-def run_gui(cfg, log=None, inspect=False, inspect_dir=None, smoke=False):
+def run_gui(cfg, log=None, inspect=False, inspect_dir=None, smoke=False,
+            screenshot=None):
     """Create the Qt application and window. Returns the exit code.
 
     `inspect=True` turns on click inspection: every click is recorded with the
@@ -1638,21 +1639,42 @@ def run_gui(cfg, log=None, inspect=False, inspect_dir=None, smoke=False):
     0. The packaging check uses it: a build can import Qt and still fail to open
     a window (a missing platform plugin is the classic case), and "the process
     is still alive" is not evidence that a window exists.
+
+    `screenshot=PATH` renders the window into that file and exits 0 (1 when the
+    file cannot be written). This is the packaging check that proves the GUI
+    actually paints, not merely that a window handle was created.
     """
     app = QApplication.instance() or QApplication([])
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")          # consistent base for the QSS to sit on
-    # A smoke run must not log in: on a machine with saved credentials that
-    # starts a network task, and closing the window 1.5s later destroyed its
-    # QThread mid-flight (SIGABRT). The check is "can a window be created".
-    window = MainWindow(cfg, log, bootstrap=not smoke)
+    # A smoke/screenshot run must not log in: on a machine with saved
+    # credentials that starts a network task, and closing the window 1.5s later
+    # destroyed its QThread mid-flight (SIGABRT). The check is "does a window
+    # get created and painted".
+    window = MainWindow(cfg, log, bootstrap=not (smoke or screenshot))
     window.show()
     if inspect:
         from .inspect import Inspector
 
         target = inspect_dir or os.path.join(os.getcwd(), "_debug")
         window.inspector = Inspector(window, target, log)
-    if smoke:
+    if screenshot:
+        target = os.path.abspath(screenshot)
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+
+        def capture():
+            pixmap = window.grab()
+            saved = pixmap.save(target)
+            if log:
+                log(f"GUI screenshot：{target} "
+                    f"({pixmap.width()}x{pixmap.height()}, saved={saved})")
+            if saved:
+                window.close()
+            else:
+                QApplication.exit(1)
+
+        QTimer.singleShot(1200, capture)
+    elif smoke:
         if log:
             log("GUI smoke test：視窗已開啟，1.5 秒後自動關閉。")
         # close() runs `closeEvent` (pollers/tasks stop) instead of yanking the

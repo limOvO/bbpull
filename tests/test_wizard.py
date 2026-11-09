@@ -634,6 +634,13 @@ class MenuActionTests(unittest.TestCase):
         args = cli.build_parser().parse_args(["pull-all", "--pick"])
         self.assertTrue(args.pick)
 
+    def test_gui_screenshot_flag_exists(self):
+        """The packaging check needs a flag that proves the GUI paints."""
+        args = cli.build_parser().parse_args(
+            ["gui", "--screenshot", "/tmp/gui.png"])
+        self.assertEqual(args.screenshot, "/tmp/gui.png")
+        self.assertFalse(args.smoke)
+
     def test_pull_interactive_alias(self):
         for flag in ("-i", "--interactive", "--ask"):
             args = cli.build_parser().parse_args(["pull", flag])
