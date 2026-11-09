@@ -645,16 +645,32 @@ def cmd_pull_all(args, cfg, log):
     return EXIT_OK if failures == 0 else EXIT_PARTIAL
 
 
+def _node_tree(node):
+    """`to_summary()` plus the children, recursively.
+
+    `Node.to_summary` deliberately omits children (the pull writers do not need
+    them), but `list-content` does: passing bare summaries printed only the
+    root items, which made it look like every PDF/Excel inside a folder was
+    missing from the course.
+    """
+    summary = node.to_summary()
+    children = [_node_tree(child) for child in node.children]
+    if children:
+        summary["children"] = children
+    return summary
+
+
 def cmd_list_content(args, cfg, log):
     session = make_session(cfg, log, args)
     session.login(force=args.force)
     course_id = resolve_course_id(session, cfg, args, log)
     puller = CoursePuller(session, course_id, "output", log, download_files=False)
     puller.fetch_tree()
-    for line in _tree_lines([n.to_summary() for n in puller.roots], depth=0):
+    tree = [_node_tree(node) for node in puller.roots]
+    for line in _tree_lines(tree, depth=0):
         print(line)
     if args.json:
-        print(json.dumps([n.to_summary() for n in puller.roots], indent=2, ensure_ascii=False))
+        print(json.dumps(tree, indent=2, ensure_ascii=False))
     return EXIT_OK
 
 
@@ -901,6 +917,12 @@ def build_parser():
                        help="create the environment only, skip pip install")
     p_env.add_argument("--no-input", action="store_true", help="never prompt")
 
+    p_shortcut = sub.add_parser(
+        "shortcut", parents=[common],
+        help="create a desktop shortcut for this installation")
+    p_shortcut.add_argument("--dir", default=None,
+                            help="folder for the shortcut (default: the desktop)")
+
     p_gui = sub.add_parser("gui", parents=[common], help="open the desktop application")
     p_gui.add_argument("--tk", action="store_true",
                        help="force the built-in Tk interface instead of Qt")
@@ -912,6 +934,9 @@ def build_parser():
                        help="record every click (widget, style, magnified crop) to a folder")
     p_gui.add_argument("--inspect-dir", default=None,
                        help="where --inspect writes its records (default: ./_debug)")
+    p_gui.add_argument("--smoke", action="store_true",
+                       help="open the window, then close it automatically "
+                            "(packaging self-check)")
     sub.add_parser("secure", parents=[common], help="move the password into encrypted storage")
     sub.add_parser("login", parents=[common], help="verify credentials and cache the session")
     p_courses = sub.add_parser("courses", parents=[common], help="list enrolled courses")
@@ -1044,7 +1069,8 @@ def cmd_gui(args, cfg, log):
         try:
             return run_qt(cfg, log,
                           inspect=bool(getattr(args, "inspect", False)),
-                          inspect_dir=getattr(args, "inspect_dir", None))
+                          inspect_dir=getattr(args, "inspect_dir", None),
+                          smoke=bool(getattr(args, "smoke", False)))
         except Exception as exc:  # noqa: BLE001
             # A Qt failure at runtime is reported, then Tk is offered - but it is
             # never swapped in without saying so.
@@ -1068,7 +1094,8 @@ def cmd_gui(args, cfg, log):
                   f"{choice['hint'].splitlines()[-1].strip()}"
                   if choice["hint"] else "此為降級的 Tk 介面。")
     try:
-        return run_tk(cfg, log, notice=notice)
+        return run_tk(cfg, log, notice=notice,
+                      smoke=bool(getattr(args, "smoke", False)))
     except Exception as exc:  # noqa: BLE001 - a missing display must not traceback
         log(f"圖形介面無法啟動：{exc}")
         log("如果這台機器沒有桌面環境，請改用 `bbpull pull --course-id <id>`。")
@@ -1193,7 +1220,7 @@ def cmd_venv(args, cfg, log):
     log("")
     log("完成。之後用下列任一方式啟動，就會固定使用這個環境：")
     log(f"  {venv_tools.venv_python()}")
-    log("  bbpull.cmd（會自動選用 .venv）")
+    log(f"  {venv_tools.launcher_name()}（會自動選用 .venv）")
     return EXIT_OK
 
 
@@ -1210,6 +1237,29 @@ class _ForceCreate:
 
     def __getattr__(self, name):
         return getattr(self._args, name)
+
+
+def cmd_shortcut(args, cfg, log):
+    """Create a desktop shortcut that launches this installation's GUI.
+
+    Works for both shapes: a packaged build points at its own executable, a
+    source checkout at `bbpull.sh` (which selects the project venv). Nothing is
+    copied, so updating the app keeps the shortcut valid.
+    """
+    from . import shortcut
+
+    try:
+        result = shortcut.create_desktop_shortcut(getattr(args, "dir", None))
+    except OSError as exc:
+        log(f"無法建立快捷方式：{exc}")
+        return EXIT_CONFIG
+
+    log(f"已建立快捷方式：{result['path']}")
+    argv = shortcut.launch_argv()
+    log(f"啟動指令：{' '.join(shortcut.quote_exec_arg(part) for part in argv)}")
+    if not result.get("trusted"):
+        log("若桌面圖示顯示成一般檔案，請在上述檔案上按右鍵 →「允許啟動」。")
+    return EXIT_OK
 
 
 # Commands that cannot do anything useful without a working login.
@@ -1278,6 +1328,7 @@ def main(argv=None):
         "list-content": cmd_list_content,
         "selftest": cmd_selftest,
         "venv": cmd_venv,
+        "shortcut": cmd_shortcut,
     }
     try:
         cfg = build_config(args)

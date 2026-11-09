@@ -12,3 +12,8 @@
 *.md text eol=lf
 *.txt text eol=lf
 *.json text eol=lf
+
+# POSIX shell launchers must stay LF: a CRLF shebang fails with
+# "/bin/sh^M: bad interpreter" on Linux, and the generated install.sh has the
+# same requirement.
+*.sh text eol=lf

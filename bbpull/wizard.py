@@ -24,7 +24,7 @@ from .config import COURSE_ID_RE, DEFAULT_BASE_URL, normalize_base_url, read_env
 from .errors import ConfigError
 from .logging_util import safe_print
 from .paths import long_path
-from .secrets_store import backend_description
+from .secrets_store import backend_description, secure_storage_label
 
 MENU_BACK = {"q", "quit", "exit", "back"}
 # "0" means cancel only where numbering is 1-based (menus, selections). It must
@@ -485,11 +485,13 @@ def pick_courses(prompter, courses, multi=False, allow_all=False, max_listed=MAX
 
 
 # ------------------------------------------------------------------- storage
-PASSWORD_STORE_OPTIONS = [
-    ("secure", "加密儲存（推薦）— 用 Windows DPAPI 綁定你的 Windows 帳號"),
-    ("env", "存進 .env（明文；方便但請勿分享該檔案）"),
-    ("never", "不要儲存 — 每次執行時再問我"),
-]
+def password_store_options():
+    """The storage choices, with the label matching this platform."""
+    return [
+        ("secure", f"加密儲存（推薦）— {secure_storage_label()}"),
+        ("env", "存進 .env（明文；方便但請勿分享該檔案）"),
+        ("never", "不要儲存 — 每次執行時再問我"),
+    ]
 
 
 def ask_password_storage(prompter, store_path, backend_desc):
@@ -498,7 +500,7 @@ def ask_password_storage(prompter, store_path, backend_desc):
     prompter.say("密碼要怎麼保存？")
     prompter.say(f"  加密儲存位置: {os.path.abspath(store_path)}")
     prompter.say(f"  這台電腦的加密方式: {backend_desc}")
-    return prompter.choose("", PASSWORD_STORE_OPTIONS, default=1)
+    return prompter.choose("", password_store_options(), default=1)
 
 
 def persist_credentials(cfg, username, password, mode):
@@ -654,7 +656,7 @@ def run_first_run(prompter, cfg, log, services):
     prompter.say(
         "  密碼保存  : "
         + {
-            "secure": "加密儲存（DPAPI）",
+            "secure": "加密儲存",
             "env": ".env 明文",
             "never": "不儲存（每次詢問）",
         }[mode]

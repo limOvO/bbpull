@@ -126,6 +126,20 @@ def backend_description(backend=None):
     }.get(backend, backend)
 
 
+def secure_storage_label():
+    """Short label for the "encrypted storage" choice, correct for this OS.
+
+    The UI used to promise "Windows DPAPI" on every platform, which was
+    misleading on Linux - where DPAPI does not exist and the desktop keyring (or
+    an owner-only file) is what actually protects the password.
+    """
+    if _dpapi_available():
+        return "Windows DPAPI，綁定你的 Windows 帳號"
+    if available_backend() == BACKEND_KEYRING:
+        return "系統鑰匙圈（GNOME Keyring／KWallet／Keychain）"
+    return "只有檔案權限保護（0600，未加密）"
+
+
 def default_store_path(state_dir):
     return os.path.join(state_dir, "credentials.dat")
 
@@ -136,6 +150,10 @@ class SecretStore:
     def __init__(self, path, backend=None):
         self.path = path
         self.backend = backend or available_backend()
+        #: Set when the desktop keyring was present but refused the write. The
+        #: caller reports the backend that was actually used, not the one that
+        #: was hoped for.
+        self.fallback_reason = None
 
     # -- low level -------------------------------------------------------
     def _encrypt(self, payload):
@@ -143,9 +161,19 @@ class SecretStore:
         if self.backend == BACKEND_DPAPI:
             return base64.b64encode(dpapi_protect(text)).decode("ascii"), BACKEND_DPAPI
         if self.backend == BACKEND_KEYRING:
-            keyring = _keyring()
-            keyring.set_password(KEYRING_SERVICE, "credentials", text)
-            return None, BACKEND_KEYRING
+            try:
+                keyring = _keyring()
+                keyring.set_password(KEYRING_SERVICE, "credentials", text)
+                return None, BACKEND_KEYRING
+            except Exception as exc:  # noqa: BLE001
+                # A keyring can be installed and still unusable: no D-Bus
+                # session over SSH, a locked wallet, or a headless container
+                # with no Secret Service. Falling back keeps the program
+                # usable, and the recorded backend says `plain`, so the status
+                # report is honest instead of claiming encryption that never
+                # happened. `save()` returns the backend that was actually
+                # used, and the wizard/`secure` print that value.
+                self.fallback_reason = f"{type(exc).__name__}: {exc}"
         return base64.b64encode(text.encode("utf-8")).decode("ascii"), BACKEND_PLAIN
 
     def _decrypt(self, data, backend):

@@ -156,6 +156,37 @@ def imports_in(path):
             yield node.lineno, module, names, node.module or "", optional
 
 
+#: Exceptions that mean "the optional Tk toolkit is not installed", not "this
+#: import is broken". Tk is an optional system package on Linux (the Qt build is
+#: the default and does not import it), so the audit must not call the Qt
+#: build's source tree broken on a machine without it.
+_OPTIONAL_TK_TOKENS = ("tkinter", "customtkinter", "libtk", "_tkinter")
+_OPTIONAL_TOOLKIT_ROOTS = ("tkinter", "customtkinter")
+
+
+def _optional_tk_module(module, exc):
+    """True for a Tk-only bbpull module failing solely on a missing Tk."""
+    if not (module == "bbpull.gui" or module.startswith("bbpull.gui.")):
+        return False
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(token in text for token in _OPTIONAL_TK_TOKENS)
+
+
+def _optional_toolkit_missing(module, exc=None):
+    """True when an optional GUI toolkit is simply absent from this machine.
+
+    The audit still runs where Tk/customtkinter are installed (Windows, a Linux
+    desktop with the distro tk package), so this is not a blanket exemption - a
+    misspelt module is still reported.
+    """
+    if (module or "").split(".")[0] not in _OPTIONAL_TOOLKIT_ROOTS:
+        return False
+    if exc is None:
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(token in text for token in _OPTIONAL_TK_TOKENS)
+
+
 class ImportResolutionTests(unittest.TestCase):
     def test_every_imported_module_exists(self):
         problems = []
@@ -170,10 +201,16 @@ class ImportResolutionTests(unittest.TestCase):
                 try:
                     found = importlib.util.find_spec(module)
                 except (ImportError, AttributeError, ValueError) as exc:
+                    if _optional_toolkit_missing(module, exc):
+                        optional_seen.append(module)
+                        continue
                     problems.append(f"{path.relative_to(ROOT)}:{lineno} "
                                     f"cannot import {module!r} ({exc})")
                     continue
                 if found is None:
+                    if _optional_toolkit_missing(module):
+                        optional_seen.append(module)
+                        continue
                     problems.append(f"{path.relative_to(ROOT)}:{lineno} "
                                     f"no module named {module!r}")
         self.assertEqual(problems, [],
@@ -190,6 +227,7 @@ class ImportResolutionTests(unittest.TestCase):
         wrong *name* inside a right module fails identically at runtime.
         """
         problems = []
+        skipped_optional_tk = []
         for path in source_files():
             for lineno, module, names, _raw, optional in imports_in(path):
                 if not module or not names or optional:
@@ -197,6 +235,10 @@ class ImportResolutionTests(unittest.TestCase):
                 try:
                     imported = importlib.import_module(module)
                 except Exception as exc:  # noqa: BLE001
+                    if (_optional_tk_module(module, exc)
+                            or _optional_toolkit_missing(module, exc)):
+                        skipped_optional_tk.append(module)
+                        continue
                     problems.append(f"{path.relative_to(ROOT)}:{lineno} "
                                     f"importing {module!r} raised "
                                     f"{type(exc).__name__}: {exc}")
@@ -210,7 +252,11 @@ class ImportResolutionTests(unittest.TestCase):
                     try:
                         importlib.import_module(f"{module}.{name}")
                         continue
-                    except Exception:  # noqa: BLE001
+                    except Exception as exc:  # noqa: BLE001
+                        qualified = f"{module}.{name}"
+                        if _optional_tk_module(qualified, exc):
+                            skipped_optional_tk.append(qualified)
+                            continue
                         problems.append(f"{path.relative_to(ROOT)}:{lineno} "
                                         f"{module!r} has no attribute {name!r}")
         self.assertEqual(problems, [],

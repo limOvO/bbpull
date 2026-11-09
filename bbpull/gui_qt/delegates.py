@@ -35,10 +35,8 @@ CARD_BADGE_H = 18
 
 
 def ui_font(px, weight=QFont.Normal):
-    font = QFont("Microsoft JhengHei UI")
-    font.setPixelSize(int(px))
-    font.setWeight(weight)
-    return font
+    """Delegate font. Delegates to the shared family list in `theme`."""
+    return theme.ui_font(px, weight)
 
 
 def wrap_lines(text, metrics, width, max_lines=TITLE_LINES):
@@ -148,14 +146,30 @@ class RowDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
         return QSize(0, self.px(ROW_HEIGHT))
 
+    def _row_box(self, rect, node):
+        """The painted card for one row. Attachment rows hang in from the left."""
+        box = QRectF(rect).adjusted(self.px(2), self.px(1),
+                                    -self.px(2), -self.px(1))
+        if node.get("kind") == "attachment":
+            box.setLeft(box.left() + self.px(24))
+        return box
+
     def _layout(self, rect, node):
         """Geometry for one row. Single source of truth for paint + hit-test."""
         px = self.px
         pad = px(10)
-        check = QRect(rect.x() + pad, rect.y() + (rect.height() - px(20)) // 2,
-                      px(20), px(20))
-        icon = QRect(check.right() + px(10),
-                     rect.y() + (rect.height() - px(22)) // 2, px(22), px(22))
+        is_attachment = node.get("kind") == "attachment"
+        if is_attachment:
+            # An embedded file is not selectable (the tray works on content
+            # ids), so it gets no checkbox and hangs in under its document.
+            check = QRect()
+            icon = QRect(rect.x() + px(58),
+                         rect.y() + (rect.height() - px(22)) // 2, px(22), px(22))
+        else:
+            check = QRect(rect.x() + pad, rect.y() + (rect.height() - px(20)) // 2,
+                          px(20), px(20))
+            icon = QRect(check.right() + px(10),
+                         rect.y() + (rect.height() - px(22)) // 2, px(22), px(22))
 
         buttons = []
         right = rect.right() - pad
@@ -166,6 +180,15 @@ class RowDelegate(QStyledItemDelegate):
             width = px(52)
             buttons.append(("open", QRect(right - width, rect.y() + (rect.height() - px(26)) // 2,
                                           width, px(26))))
+            right -= width + px(6)
+        if not is_folder:
+            # Preview is the default action, so it gets the primary position
+            # (right-most) and the accent fill. Downloading stays one click
+            # away, just to its left: nothing is fetched until the user asks.
+            width = px(52)
+            buttons.append(("preview",
+                            QRect(right - width, rect.y() + (rect.height() - px(26)) // 2,
+                                  width, px(26))))
             right -= width + px(6)
         if can_download:
             width = px(74) if is_folder else px(56)
@@ -192,7 +215,7 @@ class RowDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        row = QRectF(option.rect).adjusted(px(2), px(1), -px(2), -px(1))
+        row = self._row_box(option.rect, node)
         radius = px(9)
 
         if selected:
@@ -216,12 +239,31 @@ class RowDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(row.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
 
         check_rect, icon_rect, text_rect, buttons = self._layout(option.rect, node)
-        self._paint_check(painter, check_rect, selected, implied)
-        theme.draw_icon(painter, node["kind"], QColor(pal.kind(node["kind"])),
+        if node.get("kind") == "attachment":
+            self._paint_connector(painter, option.rect, icon_rect)
+        if not check_rect.isNull():
+            self._paint_check(painter, check_rect, selected, implied)
+        icon_kind = "file" if node.get("kind") == "attachment" else node["kind"]
+        theme.draw_icon(painter, icon_kind, QColor(pal.kind(node["kind"])),
                         QRectF(icon_rect))
         self._paint_text(painter, text_rect, node)
         for action, rect in buttons:
             self._paint_button(painter, rect, action, node, index.row())
+        painter.restore()
+
+    def _paint_connector(self, painter, rect, icon_rect):
+        """Draw the `└` that hangs an attachment row off its document."""
+        px = self.px
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(self.pal.line))
+        pen.setWidthF(max(1.0, px(1.4)))
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        x = rect.x() + px(20)
+        mid = rect.center().y()
+        painter.drawLine(QPointF(x, rect.top() + px(1)), QPointF(x, mid))
+        painter.drawLine(QPointF(x, mid), QPointF(icon_rect.left() - px(8), mid))
         painter.restore()
 
     def _paint_check(self, painter, rect, selected, implied):
@@ -294,6 +336,8 @@ class RowDelegate(QStyledItemDelegate):
             bits.append(f"{node['itemCount']} 個項目")
         if node.get("hasBody"):
             bits.append("含內文")
+        if node.get("attachmentCount"):
+            bits.append(f"{node['attachmentCount']} 個附件")
         if node.get("synthetic"):
             bits.append("系統")
         return "  ·  ".join(bits)
@@ -311,13 +355,18 @@ class RowDelegate(QStyledItemDelegate):
         hovered = self._hover_button == (row, action)
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, True)
-        if action == "download":
+        # Preview is the default action for items (nothing is downloaded until
+        # asked); a folder's "download all" remains the primary action because
+        # a folder has no preview of its own.
+        primary = action == "preview" or (
+            action == "download" and node.get("kind") == "folder")
+        if primary:
             fill = QColor(pal.muted_accent if hovered else pal.accent_soft)
             text_colour = QColor(pal.accent)
         else:
             fill = QColor(pal.hover if hovered else pal.panel)
             text_colour = QColor(pal.text if hovered else pal.text_dim)
-        pen = QPen(QColor(pal.line) if action != "download" else Qt.NoPen)
+        pen = QPen(Qt.NoPen if primary else QColor(pal.line))
         pen.setWidthF(1.0)
         painter.setPen(pen)
         painter.setBrush(fill)
@@ -325,6 +374,8 @@ class RowDelegate(QStyledItemDelegate):
         painter.setFont(ui_font(px(10)))
         if action == "open":
             label = "開啟"
+        elif action == "preview":
+            label = "預覽"
         else:
             label = "下載全部" if node.get("kind") == "folder" else "下載"
         painter.setPen(text_colour)

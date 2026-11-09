@@ -20,6 +20,8 @@
 
 ## 0. 直接下載執行檔（不需要 Python）
 
+### Windows
+
 到 [Releases](../../releases) 下載 `bbpull-*-windows-x64.zip`，解壓後執行：
 
 | 檔案 | 用途 |
@@ -35,6 +37,22 @@
 >
 > 想確認執行檔完整可用：`bbpull.exe selftest`（會檢查相依套件、GUI 引擎、
 > Qt 平台外掛、目錄可寫性）。
+
+### Linux
+
+下載 `bbpull-*-linux-x86_64.tar.gz`，解壓後：
+
+```bash
+./bbpull gui          # 開桌面視窗
+./bbpull selftest     # 同上自我檢查
+./install.sh          # 選用：安裝到 ~/.local，建立指令、選單與桌面捷徑
+./bbpull shortcut     # 只建立桌面捷徑
+```
+
+只有一個執行檔（POSIX 沒有「視窗子系統」），`bbpull-gui` 是三行的 sh 包裝。
+Qt 平台外掛（xcb／Wayland）已打包在 `_internal/`，不需要系統 Qt。
+帳號資料在 `$XDG_DATA_HOME/bbpull`（預設 `~/.local/share/bbpull`），
+有桌面鑰匙圈時密碼由系統保管，沒有時退回 0600 檔案並在 `doctor` 照實標示。
 
 ---
 
@@ -173,6 +191,8 @@ Qt 版是零 widget、純繪製。
 | 操作 | 方式 |
 | --- | --- |
 | 進入資料夾 | 雙擊該列，或按「開啟」 |
+| 預覽項目 | 雙擊非資料夾的列，或按該列的「預覽」 |
+| 變更下載資料夾 | 左下「變更下載資料夾…」（寫入 `BB_OUT_DIR`） |
 | 上一頁／下一頁 | 工具列 ← → ，或 `Alt+←` / `Alt+→` |
 | 上一層 | 工具列 ↑ ，或 `Alt+↑` |
 | 跳到上層任一層 | 點擊路徑列（breadcrumb）上的任一段 |
@@ -182,6 +202,49 @@ Qt 版是零 widget、純繪製。
 | 全選目前可見項目 | 工具列 ✓ ，或 `Ctrl+A` |
 | 下載選取項目 | 托盤「下載選取項目」，或 `Ctrl+D` |
 | 切換亮／暗色 | 右上月亮／太陽圖示 |
+
+**預覽**（`bbpull/gui_qt/preview.py` + 純邏輯 `bbpull/preview.py`）讀的是 catalog
+快取裡的 BBML `payload.body`，所以開啟預覽**不發任何請求**、也不下載檔案；內文中的
+圖片會換成文字佔位（`（圖片：alt）`），避免預覽偷偷抓媒體。公告節點現在也會帶
+`payload`，因此公告同樣可以離線預覽。預覽視窗只提供「下載此項目」，抓的就是那一個
+節點；檔名、MIME、建立／修改時間與所在路徑同時列出，讓人不必先下載才知道內容。
+**預覽是列上的主要動作**（右側強調色按鈕），下載在它左邊，避免誤抓檔案。
+
+**標題與附件**（`course.display_title`、`catalog.convert_node`）：Blackboard 對沒有
+標題的 Ultra 文件會回傳字面上的 `ultraDocumentBody`（本機實測：一門課 46 份文件中有
+39 份如此）。程式改用第一個標題（h1–h3）→ 主要非圖片附件檔名 → 第一行文字依序推導，
+並把同樣的標題寫進 `payload.title`，所以存下來的 `.md` 不會叫 `ultraDocumentBody`。
+Ultra 把 PDF／Excel／DOCX 放在文件 **body** 的 `bbcswebdav` 連結裡，不是子項目；
+`convert_node` 因此計算 `attachmentCount`（列上顯示「N 個附件」），預覽用
+`bbml.extract_file_links` 列出附件檔名。`CATALOG_VERSION` 升到 2，舊快取會自動失效
+重建，舊的公告（缺 body）與無標題文件因此會一起修正。
+
+**附件列（清單內）**：`CatalogModel._with_attachments()` 會把每個文件／公告的內嵌檔案
+展開成緊接在父項目後面、以 `└` 連接線懸掛在文件下方的**虛擬列**（`bbpull.preview.attachment_row`）。這些列有
+`kind="attachment"`、`virtual=True`、`parentContentId` 與 `attachmentUrl`，被繪製成
+縮排、無勾選框的列（勾選托盤以內容 id 為單位，虛擬列永遠不會進入選取集合），列上按鈕：
+
+- **下載** → `MainWindow.download_attachment()`：存到課程輸出資料夾中該文件所在目錄
+  （`course_dir_for` + 麵包屑路徑去掉文件本身），和完整下載的結構一致。
+- **預覽** → `preview_attachment_row()` → `preview_attachment()`：抓到
+  `$TMPDIR/bbpull-preview/<內容 id>/<檔名>`（同一份不重下載），再用
+  `desktop.open_in_file_manager()` 交給系統程式。
+
+**附件預覽的下載路徑**：`LearnSession.download_preview()` 使用複製了 cookie 的**獨立**
+`requests.Session`——主 session 明確不是執行緒安全的，而預覽是在 GUI 工作執行緒執行、
+可能同時有下載工作。直接是檔案的項目（`x-bb-file`）按「預覽檔案」時，會先讀
+`/contents/{id}/attachments` 取得真正的檔名與附件 id，再下載
+`.../attachments/{aid}/download`。
+
+**下載資料夾**由 `MainWindow.apply_output_dir()` 寫入 `.env` 的 `BB_OUT_DIR`，
+GUI 與 CLI 共用同一個設定；選擇後立即套用到下一個下載工作，不需要重開。
+
+**捷徑**（`bbpull/shortcut.py`）在 Linux 產生 freedesktop `.desktop`，Windows 則用
+`WScript.Shell` 產生 `.lnk`。它只記錄「怎麼啟動這個安裝」：凍結版指向自己的執行檔，
+原始碼版指向 `bbpull.sh`（只有該平台的 `.venv` 真的存在時）或目前的 Python。
+桌面資料夾用 `xdg-user-dir DESKTOP` 取得（繁中桌面可能是 `~/桌面`），
+最後會嘗試用 `gio set … metadata::trusted true` 標記為可信任；`install.sh` 預設
+一併建立，`bbpull shortcut` 可單獨重建，`--no-desktop` 可跳過。
 
 ### 課程分類與篩選
 
@@ -476,7 +539,7 @@ bbpull 1.0.0 — Blackboard Ultra 課程下載器
 ### 3.3 指令式（可排程、可自動化）
 
 ```powershell
-# 0) 先確認程式本身沒問題（離線，195 個測試，不需要網路與帳密）
+# 0) 先確認程式本身沒問題（離線，681 個測試，不需要網路與帳密）
 python -m bbpull selftest
 
 # 1) 檢查設定與能否登入（會列出解析後的設定，密碼以 *** 顯示）
@@ -613,13 +676,46 @@ python -m bbpull venv --create --force   # 重裝相依套件
 ```
 
 **`login error: all login strategies failed`**
-你的學校可能不是原生帳密表單，而是 SSO（Shibboleth / Azure AD / 校園入口轉導）。
-此時帳密表單不在 Blackboard 這台機器上，任何程式都無法直接送帳密。改用 cookie 匯入：
 
-1. 用瀏覽器正常登入 Blackboard。
-2. 匯出 cookie（DevTools → Application → Cookies，或用瀏覽器擴充套件匯出成 JSON）。
-3. 存成 `cookies.json`，格式：`{"base_url":"https://twc.blackboard.com","cookies":[{"name":"...","value":"...","domain":"twc.blackboard.com","path":"/"}]}`
-4. 設定 `BB_COOKIE_FILE=C:\path\to\cookies.json` 後再執行 `doctor`。
+先看程式轉述的**站台原文**（現在會附在錯誤訊息與 log 裡）：
+
+```
+[auth] form-post rejected - The username or password you typed is incorrect. ...
+[auth] direct-post rejected - The username or password you typed is incorrect. ...
+[auth] ultra-login rejected - 站台要求第二因素驗證（MFA／TOTP）...
+```
+
+| 訊息 | 意思 | 怎麼辦 |
+| --- | --- | --- |
+| `username or password ... incorrect` | 站台認為帳密不對（也可能被鎖定／要求改密碼） | 用瀏覽器以同一組帳密登入確認；改密碼後再試 |
+| `MFA／TOTP` | 密碼正確，但要求驗證碼 | 無法自動化；改用 cookie 匯入 |
+| `站台把登入導向 <host>（SSO）` | 身分提供者不在 Blackboard | 改用 cookie 匯入 |
+| `no credential form found` | 登入頁不是原生表單 | 改用 cookie 匯入 |
+
+cookie 匯入支援三種格式（`BB_COOKIE_FILE` 或 `--cookie-file` 指向任一種）：
+
+1. 本程式自己的 jar：`{"base_url":"https://twc.blackboard.com","cookies":[...]}`
+2. 瀏覽器擴充套件匯出的 JSON 陣列：`[{"name":"...","value":"...","domain":"..."}]`
+3. Netscape `cookies.txt`（`curl -c`、多數「Export cookies」擴充套件的格式）
+
+```bash
+# Linux / macOS
+BB_COOKIE_FILE=~/cookies.txt ./bbpull doctor
+./bbpull --cookie-file ~/cookies.json doctor
+```
+
+```powershell
+# Windows
+$env:BB_COOKIE_FILE = "C:\path\to\cookies.json"
+python -m bbpull doctor
+```
+
+成功後程式會把工作階層 cookie 以 JSON 寫回同一個路徑；原本的匯出檔若想保留，
+先複製一份再指向副本。
+
+> **Windows 的 DPAPI 憑證不能帶到 Linux。** DPAPI 綁定 Windows 使用者帳號，
+> `credentials.dat` 在 Linux 上無法解密；Linux 版第一次使用時要重新輸入密碼
+> （之後存在桌面鑰匙圈，或退回 0600 檔案）。
 
 **`api error: HTTP 403`**
 該端點不開放給學生角色（部分課程工具僅教師可讀）。內容大綱與公告不受影響。
@@ -696,7 +792,7 @@ bb-ultra-pull/
 ```
 
 ```powershell
-# 主要測試（538 個，離線，不連網）
+# 主要測試（681 個，離線，不連網）
 python -m unittest discover -s tests -t .
 python -m bbpull selftest
 
@@ -767,7 +863,7 @@ python -m unittest tests.test_gui       # 66 個（Tk）
 | **建置被執行中的 exe 卡住** | Windows 不允許刪除執行中的 `.exe`，前一次 smoke test 留下的行程讓建置在 COLLECT 階段 `PermissionError` | 建置前先 `taskkill`，並在無法清空 `dist/` 時給出明確訊息 |
 | **`QBuffer` 造成存取違反** | `QBuffer(QByteArray())` 的暫存物件會被 Python 回收，Qt 仍在寫入 → 行程以 `0xC0000005` 直接崩潰，不是拋例外 | 保留 `QByteArray` 的參考直到寫完 |
 | **`packaging/` 目錄名稱衝突** | 這個名字與 PyPI 的 `packaging`（pip 相依）同名，`import packaging.make_icon` 會抓到別人的套件 | 改名為 `installer/` |
-| **修正反而製造新 bug** | 我在 un() 先把 sys.stdout 換成擷取緩衝，之後 default_argv 又重新偵測「是不是視窗版本」——此時串流已非 None，於是判定為主控台版本，雙擊又回到文字選單 | 偵測一次、把結果傳進去（default_argv(..., windowed=...)），並加上直接驗證「呼叫時序」的測試 |
+| **修正反而製造新 bug** | 我在 run() 先把 sys.stdout 換成擷取緩衝，之後 default_argv 又重新偵測「是不是視窗版本」——此時串流已非 None，於是判定為主控台版本，雙擊又回到文字選單 | 偵測一次、把結果傳進去（default_argv(..., windowed=...)），並加上直接驗證「呼叫時序」的測試 |
 | **測試自己造成失敗** | smoke test 用 Popen(stdout=DEVNULL, stderr=DEVNULL) 啟動視窗版本。**提供這些 handle 會改變程式行為**：GUI 子系統行程原本 sys.stdout is None，被重導向後有了合法串流，就不再認為自己是視窗版本，於是開文字選單並以代碼 2 結束。測試在對一個正常的建置回報失敗 | 改用 os.startfile（shell 的 open 動詞，等同雙擊），並加上測試防止有人改回去 |
 | **視窗比對抓到 Explorer** | 用標題子字串比對 bpull，結果比對到標題為 bpull - File Explorer 的檔案總管視窗——測試在看著錯誤的視窗卻回報通過 | 改為比對「擁有該視窗的行程映像檔路徑」 |
 | **修正反而製造新 bug** | 我在 `run()` 先把 `sys.stdout` 換成擷取緩衝，之後 `default_argv` 又重新偵測「是不是視窗版本」——此時串流已非 `None`，於是判定為主控台版本，雙擊又回到文字選單 | 偵測一次、把結果傳進去（`default_argv(..., windowed=...)`），並加上直接驗證「呼叫時序」的測試 |
@@ -789,6 +885,10 @@ python -m unittest tests.test_gui       # 66 個（Tk）
 
 ## 10. 自行打包執行檔
 
+同一個指令在 Windows 與 Linux 都能用；它會依平台產生不同的產物。
+
+### Windows
+
 ```powershell
 python -m bbpull venv --create        # 先建立環境（含 PyInstaller 以外的相依）
 .\.venv\Scripts\python -m pip install pyinstaller
@@ -804,20 +904,68 @@ dist/bbpull/bbpull-gui.exe      # 視窗版本（雙擊不跳命令視窗）
 dist/bbpull-<版本>-windows-x64.zip
 ```
 
+### Linux
+
+```bash
+python3 -m bbpull venv --create       # 或自備 venv；PySide6 需要 6.6+
+.venv/bin/python -m pip install pyinstaller
+.venv/bin/python tools/build_exe.py --version 0.1.2
+```
+
+產出：
+
+```
+dist/bbpull/bbpull              # 唯一執行檔：CLI + `gui`
+dist/bbpull/bbpull-gui          # 三行 sh：exec ./bbpull gui
+dist/bbpull/bbpull.png          # 256px 圖示（hicolor 尺寸）
+dist/bbpull/install.sh          # 免 root 安裝到 ~/.local，含選單與桌面捷徑
+dist/bbpull/README-linux.txt
+dist/bbpull-<版本>-linux-<arch>.tar.gz
+```
+
+POSIX **沒有**「視窗子系統」這種東西：`.desktop` 直接執行 `bbpull gui`，
+`console=False` 不生效，所以不需要第二份相同的 200 MB 執行檔。
+
+PyInstaller 的 one-dir 模式在 Linux 有一個坑：執行檔名稱若與 COLLECT 目錄同名
+（`bbpull`，沒有 `.exe` 後綴），PyInstaller 會先把 bootloader 寫成 `dist/bbpull`，
+接著 COLLECT 清空 `dist/bbpull/` 時把它刪掉，最後以
+`Resource 'dist/bbpull' is not a valid file!` 失敗。spec 因此對 `EXE()` 使用
+`exclude_binaries=True`，讓執行檔先落在 `build/`，再由 COLLECT 複製進去。
+
+Tk 降級介面只在**建置機本身能 import tkinter**時才打包。Linux 發行版把 Tk 放在
+系統套件（Arch：`tk`、Debian/Ubuntu：`python3-tk`），Qt 才是預設介面；把不存在
+的模組列進 hidden imports 只會製造警告與一個不能用的路徑。
+
 用**資料夾模式**而不是單一檔案：PySide6 的單檔版本每次啟動都要把約 200 MB
 解壓到暫存目錄，開一次要等好幾秒。所以發佈的是壓縮檔。
 
 `tools/build_exe.py` 不是只跑 PyInstaller，它會**驗證產物**：
 
-1. 用應用程式自己的調色盤重新產生 `.ico`；
+1. 用應用程式自己的調色盤重新產生圖示（Windows：`.ico`；Linux：`.png`）；
 2. 執行 PyInstaller；
-3. **實際執行**兩個執行檔 —— `--help`、`selftest`、`gui --check`、`venv`，
-   並且確認視窗版本**真的開出視窗**（只看「行程還活著」不算：匯入失敗時
-   PyInstaller 會彈出錯誤對話框，行程也活著）；
-4. 打包成 zip。
+3. **實際執行**執行檔 —— `--help`、`selftest`、`gui --check`、`venv`，
+   加上 `gui --smoke --qt`（真的開一個視窗、1.5 秒後自行關閉）。
+   Windows 另外用 `os.startfile` 模擬雙擊，確認視窗版**真的開出視窗**
+   （只看「行程還活著」不算：匯入失敗時 PyInstaller 會彈出錯誤對話框，行程也活著）；
+4. Linux 補上 `bbpull-gui`、`install.sh`、`bbpull.png`、說明檔，再打包成
+   `tar.gz`（Windows 是 zip）。
 
 > 為什麼要驗證：PyInstaller 可以「建置成功」卻做出一個少掉某個動態匯入模組的
 > 執行檔——看起來沒問題，直到有人用到那個功能。這正是最糟的發佈失敗。
+
+### Linux 上的平台差異
+
+| 項目 | Windows | Linux |
+| --- | --- | --- |
+| 開啟輸出資料夾 | `os.startfile` | `xdg-open`（依序退回 `kde-open5`、`gnome-open`、`gio open`） |
+| 密碼儲存 | DPAPI（`CryptProtectData`） | 桌面鑰匙圈（`keyring`）；沒有時退回 0600 檔案並在 `doctor` 照實標示 |
+| 使用者資料 | `%LOCALAPPDATA%\bbpull` | `$XDG_DATA_HOME/bbpull`（預設 `~/.local/share/bbpull`） |
+| 失敗對話框 | Win32 `MessageBoxW` | `zenity` / `kdialog`（沒有就只寫 log） |
+| 啟動器 | `bbpull.cmd` | `bbpull.sh`（`*.sh` 在 `.gitattributes` 固定 LF） |
+| Qt 平台外掛 | `qwindows*.dll` | `libqxcb.so`、`libqwayland*.so` |
+
+`bbpull gui --smoke` 是給打包驗證用的：它開真正的視窗後自行關閉，
+所以「少一個 Qt 平台外掛」這種只有實際開窗才會炸的問題會在建置時就失敗。
 
 ---
 

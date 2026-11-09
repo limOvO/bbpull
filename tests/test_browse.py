@@ -196,6 +196,76 @@ class KindMappingTests(unittest.TestCase):
         self.assertFalse(cat.KIND_ASSESSMENT in cat.DOWNLOADABLE_KINDS)
 
 
+class TitleFallbackTests(unittest.TestCase):
+    """Untitled Ultra documents must still be identifiable.
+
+    Measured on Learn 4001: 39 of 46 documents in one course were delivered with
+    the placeholder title `ultraDocumentBody`, hiding the PDFs and Excel sheets
+    inside them behind a wall of identical rows.
+    """
+
+    WEBDAV = ('<a href="https://twc.blackboard.com/bbcswebdav/pid-1-dt-content-'
+              'rid-2_1/xid-2_1" data-bbfile=\'{"linkName":"notes.pdf"}\'>notes.pdf</a>')
+
+    def test_heading_wins(self):
+        from bbpull.course import display_title
+
+        title = display_title({"title": "ultraDocumentBody",
+                               "body": "<h2>Week 1 - Introduction</h2>"})
+        self.assertEqual(title, "Week 1 - Introduction")
+
+    def test_attachment_name_is_used_when_there_is_no_heading(self):
+        from bbpull.course import display_title
+
+        title = display_title({"title": "ultraDocumentBody",
+                               "body": f"<p>Dear students</p>{self.WEBDAV}"})
+        self.assertEqual(title, "notes.pdf")
+
+    def test_first_line_is_the_last_resort(self):
+        from bbpull.course import display_title
+
+        title = display_title({"title": "ultraDocumentBody",
+                               "body": "<p>Dear students, please read.</p>"})
+        self.assertEqual(title, "Dear students, please read.")
+
+    def test_a_real_title_is_kept(self):
+        from bbpull.course import display_title
+
+        self.assertEqual(display_title({"title": "Syllabus",
+                                        "body": "<h1>Ignored</h1>"}), "Syllabus")
+
+    def test_convert_node_fixes_title_and_counts_attachments(self):
+        node = cat.Node({
+            "id": "_5_1",
+            "title": "ultraDocumentBody",
+            "contentHandler": {"id": "resource/x-bb-document"},
+            "body": f"<p>Dear students</p>{self.WEBDAV}",
+        })
+        converted = cat.convert_node(node)
+        self.assertEqual(converted["title"], "notes.pdf")
+        self.assertEqual(converted["attachmentCount"], 1)
+        self.assertEqual(converted["payload"]["title"], "notes.pdf",
+                         "the saved Markdown file must not be named ultraDocumentBody")
+
+    def test_catalog_version_invalidates_pre_view_caches(self):
+        self.assertGreaterEqual(cat.CATALOG_VERSION, 2)
+
+
+class TreeNodeTests(unittest.TestCase):
+    def test_list_content_includes_nested_items(self):
+        """Bare `to_summary()` lacks children, so only root rows were printed."""
+        from bbpull.cli import _node_tree
+
+        root = cat.Node({"id": "r", "title": "Week 1",
+                         "contentHandler": {"id": "resource/x-bb-folder"}})
+        child = cat.Node({"id": "c", "title": "Slides.pdf",
+                          "contentHandler": {"id": "resource/x-bb-file"}})
+        root.children = [child]
+        tree = _node_tree(root)
+        self.assertEqual(tree["title"], "Week 1")
+        self.assertEqual(tree["children"][0]["title"], "Slides.pdf")
+
+
 class ConvertNodeTests(unittest.TestCase):
     def test_nested_conversion_and_counts(self):
         payload = {

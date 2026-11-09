@@ -17,7 +17,22 @@ destroyed widget.
 
 import math
 import time
-import tkinter as tk
+
+try:
+    import tkinter as tk
+except ImportError:  # pragma: no cover - Linux without the optional tk package
+    class _TkStub:
+        """Enough of `tkinter` for this module to stay importable without Tk.
+
+        The only thing used here is `TclError`, for the handlers that swallow
+        "widget already destroyed". The easing functions and the frame math are
+        pure and are tested on machines where Tk is not installed; the Qt build
+        imports `bbpull.gui.anim` incidentally and must not require Tk either.
+        """
+
+        TclError = Exception
+
+    tk = _TkStub()
 
 # ---------------------------------------------------------------- easing
 def clamp01(t):

@@ -12,6 +12,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bbpull.gui import anim  # noqa: E402
 
+#: The Spinner tests need `bbpull.gui.theme`, which imports tkinter. Tk is an
+#: optional system package on Linux, so those tests are skipped there rather than
+#: failing an otherwise healthy Qt build.
+try:
+    import tkinter  # noqa: F401
+
+    HAS_TK = True
+except Exception:  # noqa: BLE001 - optional dependency
+    HAS_TK = False
+
 
 class EasingTests(unittest.TestCase):
     def test_all_easings_are_anchored(self):
@@ -201,6 +211,7 @@ class AnimatorSchedulingTests(unittest.TestCase):
         animator.cancel(None)  # must not raise
 
 
+@unittest.skipUnless(HAS_TK, "the Spinner's palette lives in the Tk theme module")
 class SpinnerTests(unittest.TestCase):
     """Spinner is exercised through a fake canvas so no Tk root is needed."""
 

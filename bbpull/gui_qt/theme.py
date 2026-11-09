@@ -6,12 +6,37 @@ channel and antialiasing, so unlike Tk these can use genuine translucency.
 """
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 from ..palette import KIND_LABELS, Palette, blend  # noqa: F401  (re-exported)
 
 #: Icon strokes are drawn in a 24x24 coordinate space and scaled to fit.
 GRID = 24.0
+
+#: Font families tried in order (Qt skips the ones that are not installed).
+#: The first is the Windows UI font this app was designed against; the rest are
+#: the usual Linux/macOS equivalents. One list serves every platform, and CJK
+#: text still gets a font that actually has the glyphs - the interface is
+#: Chinese, so falling back to a Latin-only face would render boxes.
+UI_FONT_FAMILIES = (
+    "Microsoft JhengHei UI",
+    "Microsoft JhengHei",
+    "PingFang TC",
+    "Noto Sans CJK TC",
+    "Noto Sans CJK SC",
+    "Segoe UI",
+    "Noto Sans",
+    "DejaVu Sans",
+)
+
+
+def ui_font(px, weight=None):
+    """A pixel-sized UI font with the cross-platform family fallback list."""
+    font = QFont()
+    font.setFamilies(list(UI_FONT_FAMILIES))
+    font.setPixelSize(int(px))
+    font.setWeight(QFont.Normal if weight is None else weight)
+    return font
 
 
 def qcolor(value, alpha=None):
@@ -319,11 +344,12 @@ def stylesheet(pal):
     Uses object names / dynamic properties as hooks instead of a cascade of
     per-widget inline styles, so a theme switch is one `setStyleSheet` call.
     """
+    families = ", ".join(f'"{name}"' for name in UI_FONT_FAMILIES)
     return f"""
     QWidget {{
         background: {pal.bg};
         color: {pal.text};
-        font-family: "Microsoft JhengHei UI", "Microsoft JhengHei", "Segoe UI";
+        font-family: {families};
         font-size: 12px;
     }}
     QMainWindow, QDialog {{ background: {pal.bg}; }}

@@ -217,6 +217,28 @@ class HealthCheckTests(unittest.TestCase):
         _ok, lines = healthcheck.run_checks()
         self.assertTrue(any("bbpull.wizard" in line for line in lines))
 
+    def test_pyinstaller_unpack_folder_is_flagged_as_ephemeral(self):
+        import tempfile
+
+        path = os.path.join(tempfile.gettempdir(), "_MEI000007883", ".state")
+        self.assertTrue(healthcheck._state_is_ephemeral(path))
+
+    def test_a_home_under_tmp_is_not_ephemeral(self):
+        """Linux containers and test harnesses legitimately do this.
+
+        The old check failed anything under `$TMPDIR`, so a healthy install with
+        `HOME=/tmp/user` reported a broken self-test.
+        """
+        import tempfile
+
+        path = os.path.join(tempfile.gettempdir(), "home", ".local", "share",
+                            "bbpull", ".state")
+        self.assertFalse(healthcheck._state_is_ephemeral(path))
+
+    def test_a_normal_state_directory_is_not_ephemeral(self):
+        self.assertFalse(healthcheck._state_is_ephemeral(
+            os.path.join(config.PROJECT_ROOT, ".state")))
+
 
 class FrozenPathTests(unittest.TestCase):
     """A frozen build must not keep state inside the unpack directory."""

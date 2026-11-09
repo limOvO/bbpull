@@ -1,4 +1,4 @@
-"""Generate the application icon as a real .ico file.
+"""Generate the application icon (.ico on Windows, .png on Linux/macOS).
 
 The icon is drawn with the same palette and the same "bb" wordmark the app shows
 in its top bar, so the executable, the taskbar entry and the window all match.
@@ -9,9 +9,10 @@ An .ico is assembled by hand rather than with Pillow: the format allows PNG
 payloads, so the container is a 6-byte header plus one 16-byte directory entry
 per size - not worth a new dependency.
 
-Usage:  python packaging/make_icon.py [output.ico]
+Usage:  python installer/make_icon.py [output.ico|output.png]
 """
 
+import os
 import struct
 import sys
 from pathlib import Path
@@ -24,8 +25,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bbpull.palette import DARK  # noqa: E402
 
-#: Windows picks the closest size; 256 is used by large-icon views.
+#: Windows picks the closest size; 256 is used by large-icon views and is also
+#: the hicolor size Linux desktops ask for.
 SIZES = (16, 24, 32, 48, 64, 128, 256)
+
+#: The wordmark used to be set in the Windows UI font only, so a Linux build
+#: silently substituted a Latin-only face. The list degrades to whatever the
+#: machine actually has.
+FONT_FAMILIES = ("Microsoft JhengHei UI", "Noto Sans CJK TC", "Noto Sans",
+                 "DejaVu Sans", "Sans Serif")
+
+
+def ensure_app():
+    """A QApplication for QPixmap painting, with a headless-safe platform."""
+    if not os.environ.get("QT_QPA_PLATFORM") and not (
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    return app
 
 
 def render(size):
@@ -47,7 +65,8 @@ def render(size):
 
     # At 16px the lettering is illegible; a solid tile reads better.
     if size >= 24:
-        font = QFont("Microsoft JhengHei UI")
+        font = QFont()
+        font.setFamilies(list(FONT_FAMILIES))
         font.setPixelSize(max(7, int(size * 0.46)))
         font.setWeight(QFont.Bold)
         painter.setFont(font)
@@ -78,8 +97,7 @@ def png_bytes(pixmap):
 def write_ico(path, sizes=SIZES):
     """Assemble a multi-resolution .ico containing PNG payloads."""
     payloads = []
-    app = QApplication.instance() or QApplication([])
-    assert app is not None
+    ensure_app()
 
     for size in sizes:
         payloads.append((size, png_bytes(render(size))))
@@ -107,9 +125,22 @@ def write_ico(path, sizes=SIZES):
     return path, len(payloads)
 
 
+def write_png(path, size=256):
+    """Write one square PNG, for Linux/macOS desktop integration."""
+    ensure_app()
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png_bytes(render(size)))
+    return path, size
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     target = argv[0] if argv else "packaging/bbpull.ico"
+    if Path(target).suffix.lower() == ".png":
+        path, size = write_png(target)
+        print(f"wrote {path} ({size}x{size}, {path.stat().st_size} bytes)")
+        return 0
     path, count = write_ico(target)
     print(f"wrote {path} ({count} sizes, {path.stat().st_size} bytes)")
     return 0

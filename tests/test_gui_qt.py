@@ -138,6 +138,49 @@ class CatalogModelTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_QT and QT_ENABLED, "Qt tests are opt-in (see module docstring)")
+class AttachmentModelTests(unittest.TestCase):
+    """Embedded files are shown as indented rows, not buried in a dialog."""
+
+    BODY = ('<p>Dear students</p>'
+            '<a href="https://twc.blackboard.com/bbcswebdav/pid-1-dt-content-'
+            'rid-2_1/xid-2_1" data-bbfile=\'{"linkName":"notes.pdf"}\'>notes.pdf</a>')
+
+    def setUp(self):
+        from bbpull.catalog import Catalog
+
+        tree = [
+            {"id": "doc", "title": "Manual", "kind": "document",
+             "attachmentCount": 1, "hasBody": True, "downloadable": True,
+             "payload": {"body": self.BODY}, "children": []},
+            {"id": "plain", "title": "No attachments", "kind": "document",
+             "attachmentCount": 0, "hasBody": True, "downloadable": True,
+             "payload": {"body": "<p>text</p>"}, "children": []},
+        ]
+        self.catalog = Catalog("_1_1", "Test", "http://x", tree)
+        self.model = models.CatalogModel()
+        self.model.set_catalog(self.catalog)
+
+    def test_attachment_row_follows_its_document(self):
+        self.assertEqual(self.model.rowCount(), 3)
+        self.assertEqual(self.model.node_at(0)["id"], "doc")
+        attachment = self.model.node_at(1)
+        self.assertEqual(attachment["kind"], "attachment")
+        self.assertEqual(attachment["title"], "notes.pdf")
+        self.assertEqual(attachment["parentContentId"], "doc")
+        self.assertTrue(attachment["virtual"])
+
+    def test_attachment_row_has_no_content_id(self):
+        attachment = self.model.node_at(1)
+        self.assertIsNone(self.catalog.find(attachment["id"]),
+                          "virtual rows must not be found as content items")
+
+    def test_filter_can_match_an_attachment(self):
+        self.model.set_filter("notes.pdf")
+        self.assertEqual(self.model.rowCount(), 1)
+        self.assertEqual(self.model.node_at(0)["kind"], "attachment")
+
+
+@unittest.skipUnless(HAS_QT and QT_ENABLED, "Qt tests are opt-in (see module docstring)")
 class SelectionTests(unittest.TestCase):
     def setUp(self):
         from bbpull.catalog import Catalog, walk
@@ -264,19 +307,53 @@ class DelegateGeometryTests(unittest.TestCase):
         _c, _i, _t, buttons = self.delegate._layout(rect, build_tree()[0])
         self.assertEqual([a for a, _r in buttons], ["open", "download"])
 
-    def test_assessment_gets_no_buttons(self):
+    def test_assessment_gets_preview_only(self):
+        """An assessment cannot be downloaded, but it can still be inspected."""
         from PySide6.QtCore import QRect
 
         rect = QRect(0, 0, 900, delegates.ROW_HEIGHT)
         _c, _i, _t, buttons = self.delegate._layout(rect, build_tree()[2])
-        self.assertEqual(buttons, [])
+        self.assertEqual([a for a, _r in buttons], ["preview"])
 
-    def test_document_row_has_download_only(self):
+    def test_document_row_has_preview_and_download(self):
         from PySide6.QtCore import QRect
 
         rect = QRect(0, 0, 900, delegates.ROW_HEIGHT)
         _c, _i, _t, buttons = self.delegate._layout(rect, build_tree()[1])
-        self.assertEqual([a for a, _r in buttons], ["download"])
+        self.assertEqual([a for a, _r in buttons], ["preview", "download"])
+
+    def test_preview_is_the_primary_rightmost_action(self):
+        """Preview is the default action; downloading is deliberate."""
+        from PySide6.QtCore import QRect
+
+        rect = QRect(0, 0, 900, delegates.ROW_HEIGHT)
+        _c, _i, _t, buttons = self.delegate._layout(rect, build_tree()[1])
+        rects = dict(buttons)
+        self.assertGreater(rects["preview"].left(), rects["download"].left(),
+                           "preview takes the right-most (primary) position")
+        self.assertEqual(rects["preview"].right(), rect.right() - 11,
+                         "the primary button should sit against the row edge")
+
+    def test_folders_have_no_preview_button(self):
+        """Double-clicking a folder navigates; "開啟" already covers it."""
+        from PySide6.QtCore import QRect
+
+        rect = QRect(0, 0, 900, delegates.ROW_HEIGHT)
+        _c, _i, _t, buttons = self.delegate._layout(rect, build_tree()[0])
+        self.assertNotIn("preview", [action for action, _r in buttons])
+
+    def test_attachment_row_is_indented_and_not_selectable(self):
+        from PySide6.QtCore import QRect
+
+        from bbpull.preview import attachment_row
+
+        node = attachment_row({"id": "doc", "title": "Manual"},
+                              {"url": "https://x/y.pdf", "name": "y.pdf"})
+        rect = QRect(0, 0, 900, delegates.ROW_HEIGHT)
+        check, icon, _text, buttons = self.delegate._layout(rect, node)
+        self.assertTrue(check.isNull(), "no checkbox on a virtual attachment row")
+        self.assertGreater(icon.x(), 10, "attachment rows are indented")
+        self.assertEqual([a for a, _r in buttons], ["preview", "download"])
 
     def test_button_at_matches_painted_rect(self):
         from PySide6.QtCore import QRect
@@ -742,6 +819,387 @@ class ConnectDialogSubmitTests(unittest.TestCase):
         finally:
             self.qt_window.LearnSession = original
         self.assertIn("invalid credentials", dialog.error.text())
+
+
+@unittest.skipUnless(HAS_QT and QT_ENABLED, "Qt tests are opt-in (see module docstring)")
+class PreviewDialogTests(unittest.TestCase):
+    """Previewing must show the body and never download by itself."""
+
+    def setUp(self):
+        self.pal = theme.Palette("dark")
+
+    def _node(self, **overrides):
+        node = {
+            "id": "_101_1", "title": "Week 1 notes", "kind": "document",
+            "downloadable": True,
+            "payload": {"body": "<p>Hello preview body</p>",
+                        "modified": "2026-08-28T08:34:34.214Z",
+                        "contentHandler": {"id": "resource/x-bb-document"}},
+        }
+        node.update(overrides)
+        return node
+
+    def test_document_body_is_shown(self):
+        from PySide6.QtWidgets import QPushButton
+
+        from bbpull.gui_qt.preview import PreviewDialog
+
+        dialog = PreviewDialog(self._node(), self.pal,
+                               path_text="Week 1 › Notes",
+                               on_download=lambda: None)
+        try:
+            self.assertIn("Hello preview body", dialog.body.toPlainText())
+            labels = [button.text() for button in dialog.findChildren(QPushButton)]
+            self.assertIn("下載此項目", labels)
+        finally:
+            dialog.close()
+
+    def test_download_button_triggers_the_callback(self):
+        from bbpull.gui_qt.preview import PreviewDialog
+
+        calls = []
+        dialog = PreviewDialog(self._node(), self.pal,
+                               on_download=lambda: calls.append(1))
+        try:
+            dialog._download()
+        finally:
+            dialog.close()
+        self.assertEqual(calls, [1])
+
+    def test_assessment_has_no_download_but_explains_itself(self):
+        from PySide6.QtWidgets import QPushButton
+
+        from bbpull.gui_qt.preview import PreviewDialog
+
+        dialog = PreviewDialog(self._node(kind="assessment", downloadable=False,
+                                          payload={}), self.pal)
+        try:
+            self.assertIn("預覽", dialog.body.toPlainText())
+            labels = [button.text() for button in dialog.findChildren(QPushButton)]
+            self.assertNotIn("下載此項目", labels)
+        finally:
+            dialog.close()
+
+    def test_external_link_offers_browser_button(self):
+        from PySide6.QtWidgets import QPushButton
+
+        from bbpull.gui_qt.preview import PreviewDialog
+
+        dialog = PreviewDialog(self._node(kind="link", downloadable=False,
+                                          payload={}), self.pal,
+                               link_url="https://zoom.example/room")
+        try:
+            labels = [button.text() for button in dialog.findChildren(QPushButton)]
+            self.assertIn("在瀏覽器開啟", labels)
+        finally:
+            dialog.close()
+
+    # -- embedded attachments -----------------------------------------
+    ATTACHMENT_BODY = (
+        '<p>Dear students</p>'
+        '<a href="https://twc.blackboard.com/bbcswebdav/pid-1-dt-content-'
+        'rid-2_1/xid-2_1" data-bbfile=\'{"linkName":"notes.pdf"}\'>notes.pdf</a>')
+
+    def test_embedded_attachment_has_a_preview_button(self):
+        from PySide6.QtWidgets import QPushButton
+
+        from bbpull.gui_qt.preview import PreviewDialog
+
+        calls = {}
+
+        def preview(url, name, item_id, done, fail):
+            calls.update(url=url, name=name, item_id=item_id,
+                         done=done, fail=fail)
+
+        node = self._node(payload={"body": self.ATTACHMENT_BODY})
+        dialog = PreviewDialog(node, self.pal,
+                               on_preview_attachment=preview)
+        try:
+            buttons = [button for button in dialog.findChildren(QPushButton)
+                       if button.text() == "預覽"]
+            self.assertEqual(len(buttons), 1)
+            buttons[0].click()
+        finally:
+            dialog.close()
+        self.assertEqual(calls["name"], "notes.pdf")
+        self.assertIn("bbcswebdav", calls["url"])
+        self.assertEqual(calls["item_id"], "_101_1")
+
+    def test_image_attachment_is_shown_inline(self):
+        import tempfile
+
+        from PySide6.QtGui import QPixmap
+
+        from bbpull.gui_qt.preview import PreviewDialog
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "photo.png")
+            pixmap = QPixmap(8, 8)
+            pixmap.fill()
+            pixmap.save(path)
+            dialog = PreviewDialog(self._node(), self.pal)
+            try:
+                dialog._attachment_ready(path, "photo.png")
+                shown = dialog.image_label.pixmap()
+                self.assertIsNotNone(shown)
+                self.assertFalse(shown.isNull())
+                self.assertIn("圖片預覽", dialog.status.text())
+            finally:
+                dialog.close()
+
+    def test_non_image_attachment_opens_the_system_viewer(self):
+        from unittest import mock
+
+        from bbpull.gui_qt import preview as preview_module
+
+        dialog = preview_module.PreviewDialog(self._node(), self.pal)
+        try:
+            with mock.patch.object(preview_module, "open_in_file_manager",
+                                   return_value=True):
+                dialog._attachment_ready("/tmp/x.pdf", "x.pdf")
+            self.assertIn("已用系統程式開啟", dialog.status.text())
+        finally:
+            dialog.close()
+
+    def test_file_item_offers_a_file_preview_button(self):
+        from PySide6.QtWidgets import QPushButton
+
+        from bbpull.gui_qt.preview import PreviewDialog
+
+        seen = []
+        dialog = PreviewDialog(self._node(kind="file", downloadable=True,
+                                          payload={}), self.pal,
+                               on_preview_file=lambda node, done, fail: seen.append(node["id"]))
+        try:
+            buttons = [button for button in dialog.findChildren(QPushButton)
+                       if button.text() == "預覽檔案"]
+            self.assertEqual(len(buttons), 1)
+            buttons[0].click()
+        finally:
+            dialog.close()
+        self.assertEqual(seen, ["_101_1"])
+
+
+@unittest.skipUnless(HAS_QT and QT_ENABLED, "Qt tests are opt-in (see module docstring)")
+class OutputDirTests(unittest.TestCase):
+    """The download root must be choosable and must survive a restart."""
+
+    def setUp(self):
+        import tempfile
+
+        from bbpull.config import load_config
+        from bbpull.gui_qt import window as qt_window
+
+        self.tmp = tempfile.TemporaryDirectory()
+        cfg = load_config(None)
+        cfg.username = "tester"
+        cfg.password = "secret"
+        cfg.env_file = os.path.join(self.tmp.name, ".env")
+        cfg.state_dir = os.path.join(self.tmp.name, "state")
+        os.makedirs(cfg.state_dir, exist_ok=True)
+        self.cfg = cfg
+        self.win = qt_window.MainWindow(cfg, lambda *a: None)
+        # `_bootstrap` is a singleShot timer; if it fires during another test's
+        # event processing it would start a real login thread. This class only
+        # exercises the output-directory setting.
+        self.win.tasks.start = lambda *a, **k: None
+        self.win.open_connect = lambda: None
+        self.win.hide()
+
+    def tearDown(self):
+        try:
+            self.win.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self.tmp.cleanup()
+
+    def test_apply_output_dir_updates_ui_and_env(self):
+        target = os.path.join(self.tmp.name, "downloads")
+        os.makedirs(target)
+        self.assertTrue(self.win.apply_output_dir(target))
+        self.assertEqual(self.win.out_root, os.path.abspath(target))
+        self.assertEqual(self.cfg.out_dir, os.path.abspath(target))
+        self.assertIn(os.path.abspath(target), self.win.out_label.text())
+        with open(self.cfg.env_file, encoding="utf-8") as handle:
+            self.assertIn("BB_OUT_DIR=", handle.read())
+
+    def test_blank_path_is_ignored(self):
+        before = self.win.out_root
+        self.assertFalse(self.win.apply_output_dir(""))
+        self.assertEqual(self.win.out_root, before)
+
+    def test_preview_handler_is_wired(self):
+        from bbpull.gui_qt import window as qt_window
+
+        seen = {}
+
+        class FakeDialog:
+            def __init__(self, node, pal, **kwargs):
+                seen["node"] = node
+                seen["kwargs"] = kwargs
+
+            def exec(self):
+                seen["exec"] = True
+
+        saved = qt_window.PreviewDialog
+        qt_window.PreviewDialog = FakeDialog
+        try:
+            node = {"id": "d3", "title": "Loose doc", "kind": "document",
+                    "downloadable": True, "payload": {}}
+            self.win.open_preview(node)
+        finally:
+            qt_window.PreviewDialog = saved
+        self.assertIs(seen.get("node"), node)
+        self.assertTrue(seen.get("exec"))
+
+
+@unittest.skipUnless(HAS_QT and QT_ENABLED, "Qt tests are opt-in (see module docstring)")
+class PreviewFetchTests(unittest.TestCase):
+    """Fetching an attachment must go through the authenticated session."""
+
+    def setUp(self):
+        import tempfile
+
+        from bbpull.config import load_config
+        from bbpull.gui_qt import window as qt_window
+
+        self.tmp = tempfile.TemporaryDirectory()
+        cfg = load_config(None)
+        cfg.username = "tester"
+        cfg.password = "secret"
+        cfg.course_id = "_12529_1"
+        cfg.env_file = os.path.join(self.tmp.name, ".env")
+        cfg.state_dir = os.path.join(self.tmp.name, "state")
+        os.makedirs(cfg.state_dir, exist_ok=True)
+        self.win = qt_window.MainWindow(cfg, lambda *a: None)
+        self.win.hide()
+
+        class InlineTasks:
+            def start(inner, fn, on_ok, on_fail=None, *args, **kwargs):
+                try:
+                    result = fn()
+                except Exception as exc:  # noqa: BLE001
+                    if on_fail:
+                        on_fail(str(exc))
+                    return None
+                if on_ok:
+                    on_ok(result)
+                return None
+
+            def cancel_all(inner):
+                pass
+
+        self.win.tasks = InlineTasks()
+
+    def tearDown(self):
+        try:
+            self.win.close()
+        except Exception:  # noqa: BLE001
+            pass
+        import shutil
+        import tempfile
+        root = os.path.join(tempfile.gettempdir(), "bbpull-preview")
+        for item_id in ("_test_preview_att", "_test_preview_file",
+                        "_test_preview_fail"):
+            shutil.rmtree(os.path.join(root, item_id), ignore_errors=True)
+        self.tmp.cleanup()
+
+    def _fake_session(self, fail=False):
+        session = self
+
+        class Fake:
+            def download_preview(self, url, target):
+                if fail:
+                    raise RuntimeError("HTTP 403")
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "wb") as handle:
+                    handle.write(b"%PDF-1.4")
+                return "saved", 8, target
+
+            def api_get(self, path):
+                return {"results": [{"id": "_att1",
+                                     "fileName": "notes.pdf"}]}
+
+            def url(self, path):
+                return "https://twc.blackboard.com" + path
+
+        return Fake()
+
+    def test_attachment_is_downloaded_and_reported(self):
+        import tempfile
+
+        self.win.session = self._fake_session()
+        done = {}
+        failures = []
+        self.win.preview_attachment(
+            "https://twc.blackboard.com/bbcswebdav/xid-1_1", "notes.pdf",
+            "_test_preview_att", lambda path, name: done.update(path=path, name=name),
+            failures.append)
+        self.assertEqual(done["name"], "notes.pdf")
+        self.assertTrue(os.path.isfile(done["path"]))
+        self.assertTrue(done["path"].startswith(tempfile.gettempdir()))
+        self.assertEqual(failures, [])
+
+    def test_file_item_resolves_its_attachment_then_downloads(self):
+        self.win.session = self._fake_session()
+        seen = {}
+        self.win.preview_file_node(
+            {"id": "_test_preview_file", "title": "Slides"},
+            lambda path, name: seen.update(path=path, name=name),
+            lambda message: seen.update(error=message))
+        self.assertEqual(seen.get("name"), "notes.pdf")
+        self.assertTrue(os.path.isfile(seen["path"]))
+        self.assertNotIn("error", seen)
+
+    def test_failure_reaches_the_dialog(self):
+        self.win.session = self._fake_session(fail=True)
+        errors = []
+        self.win.preview_attachment(
+            "https://twc.blackboard.com/bbcswebdav/xid-1_1", "notes.pdf",
+            "_test_preview_fail", lambda path, name: None, errors.append)
+        self.assertTrue(errors)
+        self.assertIn("403", errors[0])
+
+    def test_attachment_row_buttons_route_outside_the_dialog(self):
+        calls = []
+        self.win.preview_attachment_row = lambda node: calls.append(
+            ("preview", node["id"]))
+        self.win.download_attachment = lambda node: calls.append(
+            ("download", node["id"]))
+        node = {"id": "__attachment__:doc:0", "kind": "attachment"}
+        self.win._on_row_button("preview", node)
+        self.win._on_row_button("download", node)
+        self.assertEqual(calls, [("preview", "__attachment__:doc:0"),
+                                 ("download", "__attachment__:doc:0")])
+
+    def test_opening_a_preview_on_an_attachment_row_opens_the_file(self):
+        seen = []
+        self.win.preview_attachment_row = lambda node: seen.append(node["id"])
+        self.win.open_preview({"id": "__attachment__:doc:0",
+                               "kind": "attachment", "title": "notes.pdf"})
+        self.assertEqual(seen, ["__attachment__:doc:0"])
+
+    def test_download_attachment_lands_in_the_course_tree(self):
+        from bbpull.catalog import Catalog
+        from bbpull.preview import attachment_row
+        from bbpull.selective import course_dir_for
+
+        tree = [{
+            "id": "doc", "title": "Manual", "kind": "document",
+            "attachmentCount": 1, "hasBody": True, "downloadable": True,
+            "payload": {}, "children": [],
+        }]
+        self.win.catalog = Catalog("_1_1", "Course", "http://x", tree)
+        self.win.out_root = os.path.join(self.tmp.name, "out")
+        self.win.session = self._fake_session()
+        node = attachment_row(self.win.catalog.find("doc"),
+                              {"url": "https://twc.blackboard.com/xid-1_1",
+                               "name": "notes.pdf"})
+        self.win.download_attachment(node)
+        expected = os.path.join(course_dir_for(self.win.out_root,
+                                               self.win.catalog), "notes.pdf")
+        self.assertTrue(os.path.isfile(expected))
+        self.assertEqual(os.path.getsize(expected), 8)
 
 
 @unittest.skipUnless(HAS_QT and QT_ENABLED, "Qt tests are opt-in (see module docstring)")

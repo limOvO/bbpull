@@ -30,8 +30,30 @@ REQUIRED_PACKAGES = (
     "customtkinter>=5.2.0",
 )
 
-#: Shown when a venv is missing; one command, copy-pasteable.
-CREATE_HINT = "python -m bbpull venv --create"
+#: Extra package installed on Linux/macOS only. `keyring` gives the same
+#: "the OS protects the secret" property that DPAPI gives on Windows. It is
+#: best-effort by design: on a headless machine with no secret service the
+#: credential store honestly reports `plain` (owner-only file) rather than
+#: pretending it is encrypted.
+POSIX_EXTRA_PACKAGES = ("keyring>=24",)
+
+
+def packages_for_platform():
+    """The install list for the platform this process is running on."""
+    if os.name == "nt":
+        return tuple(REQUIRED_PACKAGES)
+    return tuple(REQUIRED_PACKAGES) + tuple(POSIX_EXTRA_PACKAGES)
+
+
+#: Shown when a venv is missing; one command, copy-pasteable. `python3` is the
+#: name that exists on a stock Linux install, where bare `python` often does not.
+CREATE_HINT = ("python -m bbpull venv --create" if os.name == "nt"
+               else "python3 -m bbpull venv --create")
+
+
+def launcher_name():
+    """Name of the source-checkout launcher shipped for this platform."""
+    return "bbpull.cmd" if os.name == "nt" else "bbpull.sh"
 
 #: Set in the child's environment before re-exec so it cannot recurse.
 REEXEC_GUARD = "BBPULL_REEXEC"
@@ -118,7 +140,7 @@ def describe(root=None):
         "current_python": sys.executable,
         "base_python": (info or {}).get("home") or (info or {}).get("executable"),
         "version": (info or {}).get("version"),
-        "packages": list(REQUIRED_PACKAGES),
+        "packages": list(packages_for_platform()),
         "hint": CREATE_HINT,
     }
 
@@ -131,7 +153,7 @@ def create_command(base_python=None, root=None):
 def install_command(python, packages=None):
     """The pip install argv for a venv interpreter."""
     return [str(python), "-m", "pip", "install", "--upgrade",
-            *list(packages or REQUIRED_PACKAGES)]
+            *list(packages if packages is not None else packages_for_platform())]
 
 
 #: Characters a shell would interpret inside an unquoted argument. The `>=`
@@ -354,7 +376,7 @@ def report(root=None, log=None):
             lines.append("  目前執行中   : 就是這個環境")
         else:
             lines.append(f"  目前執行中   : {info['current_python']}")
-            lines.append("                 （不是這個環境；bbpull.cmd 會自動改用）")
+            lines.append(f"                 （不是這個環境；{launcher_name()} 會自動改用）")
         check = verify(root)
         lines.append("")
         lines.append("  套件：")
@@ -373,6 +395,6 @@ def report(root=None, log=None):
         lines.append("  建立專案環境（會下載 PySide6，約 80 MB）：")
         lines.append(f"    {info['hint']}")
         lines.append("")
-        lines.append("  建立之後，用 bbpull.cmd 或 .venv\\Scripts\\python -m bbpull 執行，")
+        lines.append(f"  建立之後，用 {launcher_name()} 或 {info['venv_python']} -m bbpull 執行，")
         lines.append("  就會固定使用這個環境，不受其他 Python 影響。")
     return "\n".join(lines)

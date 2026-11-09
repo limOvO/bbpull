@@ -18,11 +18,15 @@ import os
 import time
 from collections import OrderedDict
 
-from .course import Node
+from . import bbml
+from .course import Node, display_title
 from .logging_util import wrap_logger
 from .paths import long_path, sanitize
 
-CATALOG_VERSION = 1
+#: Bumped when cached nodes lack a field the UI now relies on. Version 2 adds
+#: announcement bodies (preview) and attachment counts; an old cache would
+#: otherwise show announcements as empty and hide embedded PDF/Excel files.
+CATALOG_VERSION = 2
 
 # Node kinds the UI renders differently.
 KIND_FOLDER = "folder"
@@ -33,6 +37,10 @@ KIND_ASSESSMENT = "assessment"
 KIND_TOOL = "tool"
 KIND_ANNOUNCEMENT = "announcement"
 KIND_OTHER = "other"
+
+#: Virtual kind: a file embedded in a document body, not a content item of its
+#: own. The content list shows these as indented child rows.
+KIND_ATTACHMENT = "attachment"
 
 # Synthetic container id for the announcements branch.
 ANNOUNCEMENTS_ID = "__announcements__"
@@ -63,6 +71,7 @@ KIND_LABELS = {
     KIND_FOLDER: "資料夾",
     KIND_DOCUMENT: "文件",
     KIND_FILE: "檔案",
+    KIND_ATTACHMENT: "附件",
     KIND_LINK: "外部連結",
     KIND_ASSESSMENT: "測驗/作業",
     KIND_TOOL: "互動工具",
@@ -124,10 +133,15 @@ def payload_for_cache(raw):
     Bodies are kept: re-fetching them per selected item would cost one request
     each, and the walk already has them. This makes the catalog cache somewhat
     larger but lets selective download run straight from the cache.
+
+    The title is normalised: the API reports `ultraDocumentBody` for untitled
+    Ultra documents, which would otherwise name the saved `.md` file that way.
     """
     if not raw:
         return {}
-    return {key: raw[key] for key in _PAYLOAD_KEYS if key in raw}
+    payload = {key: raw[key] for key in _PAYLOAD_KEYS if key in raw}
+    payload["title"] = display_title(raw)
+    return payload
 
 
 def convert_node(node, depth=0):
@@ -144,6 +158,9 @@ def convert_node(node, depth=0):
     item_count = sum(child["itemCount"] for child in children) if children else 0
     if kind != KIND_FOLDER:
         item_count = max(item_count, 1)
+    # Embedded PDFs/Excel/DOCX live in the BBML body, not as child items, so
+    # without this count the row looked like it contained nothing.
+    attachment_count = len(bbml.extract_file_links(node.body))
     return OrderedDict(
         [
             ("id", node.id),
@@ -155,6 +172,7 @@ def convert_node(node, depth=0):
             ("hasChildren", bool(children)),
             ("childCount", len(children)),
             ("itemCount", item_count),
+            ("attachmentCount", attachment_count),
             ("downloadable", kind in DOWNLOADABLE_KINDS),
             ("payload", payload_for_cache(node.raw)),
             ("children", children),
@@ -171,7 +189,7 @@ def announcement_node(announcements):
             OrderedDict(
                 [
                     ("id", ann.get("id") or ""),
-                    ("title", (ann.get("title") or "").strip() or "(未命名公告)"),
+                    ("title", display_title(ann) or "(未命名公告)"),
                     ("kind", KIND_ANNOUNCEMENT),
                     ("handler", "announcement"),
                     ("depth", 1),
@@ -179,7 +197,12 @@ def announcement_node(announcements):
                     ("hasChildren", False),
                     ("childCount", 0),
                     ("itemCount", 1),
+                    ("attachmentCount",
+                     len(bbml.extract_file_links(ann.get("body") or ""))),
                     ("downloadable", True),
+                    # The body is kept so the preview can render an announcement
+                    # without another request, exactly like document items.
+                    ("payload", payload_for_cache(ann)),
                     ("created", ann.get("created")),
                     ("modified", ann.get("modified")),
                     ("durationType", duration.get("type")),

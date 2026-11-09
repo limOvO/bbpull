@@ -39,12 +39,27 @@ def user_data_dir():
     written there would vanish every run and the saved login would never
     persist. Measured in the packaged build: the state directory resolved to
     `%TEMP%\\_MEI000007883\\.state`.
+
+    Each platform gets its own convention, because a dotted folder in `$HOME`
+    is not what a Linux user expects for application data:
+
+        Windows  %LOCALAPPDATA%\\bbpull
+        macOS    ~/Library/Application Support/bbpull
+        Linux    $XDG_DATA_HOME/bbpull  (default ~/.local/share/bbpull)
+
+    `BB_STATE_DIR` still overrides the state directory outright.
     """
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if base:
             return os.path.join(base, "bbpull")
-    return os.path.join(os.path.expanduser("~"), ".bbpull")
+        return os.path.join(os.path.expanduser("~"), ".bbpull")
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library",
+                            "Application Support", "bbpull")
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "bbpull")
 
 
 def default_root():

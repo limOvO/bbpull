@@ -12,8 +12,10 @@ Ultra keeps attachments inside the item's `body` as BBML `<a href=".../bbcswebda
 pid-...-xid-...">` links, so body parsing is a first-class download source.
 """
 
+import html
 import json
 import os
+import re
 import threading
 from collections import OrderedDict
 
@@ -41,6 +43,70 @@ FOLDER_LIKE = HANDLER_FOLDER | {
     "resource/x-bb-folder-file",
 }
 
+#: Titles the API returns for Ultra documents that were never given a name.
+#: Measured on Learn 4001: 39 of 46 documents in one course were titled
+#: `ultraDocumentBody`, which made the course list a wall of identical rows and
+#: hid what the documents actually contained (PDFs, Excel sheets, images).
+_BOGUS_TITLES = {"ultradocumentbody", "untitled", "document", "content", ""}
+
+#: Attachments that do not make a useful title on their own.
+_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
+                     ".svg", ".tif", ".tiff")
+
+_HEADING = re.compile(r"<h[1-3][^>]*>(.*?)</h[1-3]>", re.I | re.S)
+
+
+def _plain(fragment):
+    """Strip tags and collapse whitespace."""
+    text = re.sub(r"<[^>]+>", " ", fragment or "")
+    return re.sub(r"\s+", " ", html.unescape(text)).strip()
+
+
+def _first_heading(body):
+    for match in _HEADING.finditer(body or ""):
+        text = _plain(match.group(1))
+        if text:
+            return text[:80]
+    return ""
+
+
+def _preferred_attachment(body):
+    """First non-image attachment name - a PDF/Excel is a better title than a photo."""
+    for link in bbml.extract_file_links(body):
+        name = (link.get("name") or "").strip()
+        if name and not name.lower().endswith(_IMAGE_EXTENSIONS):
+            return name[:80]
+    return ""
+
+
+def _first_text_line(body):
+    for line in bbml.to_text(body).splitlines():
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            return line[:80]
+    return ""
+
+
+def display_title(raw):
+    """A human-usable title for a content item.
+
+    The API sometimes reports the placeholder `ultraDocumentBody` instead of a
+    title. Falling back to the first heading, then to the main attached file
+    name, then to the first line of text turns an unidentifiable row into
+    something the user can recognize before downloading anything.
+    """
+    raw = raw or {}
+    title = (raw.get("title") or "").strip()
+    if title.lower() not in _BOGUS_TITLES:
+        return title
+    body = raw.get("body") or ""
+    return (_first_heading(body)
+            or _preferred_attachment(body)
+            or _first_text_line(body)
+            or title
+            or (raw.get("id") or "").strip()
+            or "untitled")
+
 
 class Node:
     """One content item in the course outline."""
@@ -63,7 +129,7 @@ class Node:
         self.raw = payload or {}
         self.id = self.raw.get("id") or ""
         self.parent_id = self.raw.get("parentId")
-        self.title = (self.raw.get("title") or "").strip() or self.id or "untitled"
+        self.title = display_title(self.raw) or self.id or "untitled"
         self.body = self.raw.get("body") or ""
         self.description = self.raw.get("description") or ""
         self.position = self.raw.get("position")

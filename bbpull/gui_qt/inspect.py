@@ -242,11 +242,9 @@ class Inspector(QObject):
                       max(margin, self.window.height() - self.hud.height() - 44))
 
     def _open_folder(self):
-        try:
-            if os.name == "nt":
-                os.startfile(self.out_dir)  # noqa: S606 - user-initiated
-        except OSError:
-            pass
+        from ..desktop import open_in_file_manager
+
+        open_in_file_manager(self.out_dir)
 
     # ------------------------------------------------------- selection
     def start_region(self):

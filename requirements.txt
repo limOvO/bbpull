@@ -4,5 +4,11 @@ requests>=2.31.0
 # Without it `bbpull gui` falls back to the built-in Tk interface.
 PySide6-Essentials>=6.6
 # Fallback desktop GUI. Only needed if PySide6 is unavailable, or with
-# `bbpull gui --tk`.
+# `bbpull gui --tk`. It needs a working Tk: on Linux that means the distro
+# package (`tk` on Arch, `python3-tk` on Debian/Ubuntu), not pip.
 customtkinter>=5.2.0
+# Encrypted credential storage on Linux/macOS (the desktop secret service).
+# Windows uses DPAPI from the standard library and does not need this. Without
+# it, credentials fall back to an owner-only (0600) file and `bbpull doctor`
+# says so instead of claiming encryption.
+keyring>=24; sys_platform != "win32"

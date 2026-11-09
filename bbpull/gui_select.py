@@ -50,9 +50,14 @@ _PROBE_CODE = (
 
 
 def pip_command(python_exe, package):
-    """The exact command for `python_exe`, quoted for the shell in use."""
+    """The exact command for `python_exe`, quoted for the shell in use.
+
+    A path with spaces has to be quoted on every platform, not just Windows:
+    Linux installs under `/home/<user>/My Apps/...` are rare but real, and the
+    quoted command is also what gets copied into a bug report.
+    """
     exe = python_exe or "python"
-    if os.name == "nt" and " " in exe:
+    if " " in exe:
         exe = f'"{exe}"'
     return f"{exe} -m pip install {package}"
 

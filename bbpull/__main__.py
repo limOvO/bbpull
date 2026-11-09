@@ -20,12 +20,8 @@ import sys
 import traceback
 
 from .cli import main
+from .desktop import show_message as _show_message
 from .venv_tools import REEXEC_GUARD, maybe_reexec
-
-#: Message box styles (avoid a ctypes.wintypes import just for these).
-_MB_ICONERROR = 0x10
-_MB_ICONINFORMATION = 0x40
-_MB_SETFOREGROUND = 0x10000
 
 ERROR_LOG_NAME = "bbpull-error.log"
 
@@ -127,19 +123,15 @@ def write_error_log(text):
 
 
 def show_message(title, text, error=True):
-    """Show a native message box. Uses Win32 directly so it works even if Qt,
-    the toolkits and the console are all unavailable - which is precisely the
-    situation where the user needs to be told something."""
-    if os.name != "nt":
-        return False
-    try:
-        import ctypes
+    """Show a native message box, without importing Qt or Tk.
 
-        flags = (_MB_ICONERROR if error else _MB_ICONINFORMATION) | _MB_SETFOREGROUND
-        ctypes.windll.user32.MessageBoxW(None, text, title, flags)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+    Kept as a thin wrapper (rather than calling `desktop` at the call site) so
+    tests and diagnostics can replace it, and so the platform-specific details
+    live in one place. On Windows this is a Win32 MessageBox; on Linux it uses
+    zenity/kdialog when present, which is the only way a `.desktop` launch with
+    no terminal can report a startup failure.
+    """
+    return _show_message(title, text, error=error)
 
 
 def report_failure(output, code):

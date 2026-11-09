@@ -7,7 +7,6 @@ widget per row. That single change is what removes the stutter.
 """
 
 import os
-import webbrowser
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -42,7 +41,11 @@ from PySide6.QtWidgets import (
 
 from ..catalog import Catalog, catalog_cache_path
 from ..cli import fetch_courses
+from ..desktop import open_in_file_manager
 from ..errors import ApiError, ConfigError, LoginError
+from ..paths import sanitize
+from ..preview import preview_cache_path
+from ..secrets_store import secure_storage_label
 from ..selective import JobManager, course_dir_for, run_download_job
 from ..session import LearnSession
 from ..gui.courses import (
@@ -59,6 +62,7 @@ from ..gui.courses import (
 from . import theme
 from .delegates import CourseDelegate, RowDelegate
 from .models import CatalogModel, CourseListModel, NodeRole
+from .preview import PreviewDialog
 from .workers import JobPoller, TaskRunner
 
 APP_NAME = "bbpull"
@@ -68,10 +72,8 @@ PAGE_LOADING = 2
 
 
 def ui_font(px, weight=QFont.Normal):
-    font = QFont("Microsoft JhengHei UI")
-    font.setPixelSize(int(px))
-    font.setWeight(weight)
-    return font
+    """Window font. Delegates to the shared family list in `theme`."""
+    return theme.ui_font(px, weight)
 
 
 class ContentView(QListView):
@@ -93,12 +95,14 @@ class ContentView(QListView):
         self.setSpacing(0)
         self._on_toggle = None
         self._on_open = None
+        self._on_preview = None
         self._row_delegate = None
 
-    def wire(self, delegate, on_toggle, on_open):
+    def wire(self, delegate, on_toggle, on_open, on_preview=None):
         self._row_delegate = delegate
         self._on_toggle = on_toggle
         self._on_open = on_open
+        self._on_preview = on_preview
 
     def _node_at(self, pos):
         index = self.indexAt(pos)
@@ -149,9 +153,15 @@ class ContentView(QListView):
 
     def mouseDoubleClickEvent(self, event):
         index, node = self._node_at(event.position().toPoint())
-        if node and index.isValid() and node["kind"] == "folder" and self._on_open:
-            self._on_open(node["id"])
-            return
+        if node and index.isValid():
+            if node["kind"] == "folder" and self._on_open:
+                self._on_open(node["id"])
+                return
+            # A double-click on anything else opens the preview: that is the
+            # gesture people try first, and it downloads nothing.
+            if self._on_preview:
+                self._on_preview(node)
+                return
         super().mouseDoubleClickEvent(event)
 
 
@@ -222,7 +232,8 @@ class ConnectDialog(QDialog):
         title.setFont(ui_font(15, QFont.Bold))
         layout.addWidget(title)
 
-        hint = QLabel("密碼只會用在這個程式裡，並可選擇加密儲存到你的 Windows 帳號。")
+        hint = QLabel("密碼只會用在這個程式裡，並可選擇加密儲存（"
+                      + secure_storage_label() + "）。")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #9aa3b8;")
         layout.addWidget(hint)
@@ -290,7 +301,7 @@ class ConnectDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, cfg, log=None):
+    def __init__(self, cfg, log=None, bootstrap=True):
         super().__init__()
         self.cfg = cfg
         self.log = log or (lambda *a: None)
@@ -324,7 +335,8 @@ class MainWindow(QMainWindow):
         self.apply_theme()
         self.show_placeholder()
         self.poller.start()
-        QTimer.singleShot(80, self._bootstrap)
+        if bootstrap:
+            QTimer.singleShot(80, self._bootstrap)
 
     # ------------------------------------------------------------- layout
     def _build_ui(self):
@@ -458,6 +470,11 @@ class MainWindow(QMainWindow):
         self.out_label.setObjectName("SidebarFooter")
         self.out_label.setWordWrap(True)
         layout.addWidget(self.out_label)
+        self.btn_out_dir = QPushButton("變更下載資料夾…")
+        self.btn_out_dir.setObjectName("Ghost")
+        self.btn_out_dir.setToolTip("選擇下載的根目錄；每門課會在其下建立專屬資料夾")
+        self.btn_out_dir.clicked.connect(self.choose_output_dir)
+        layout.addWidget(self.btn_out_dir)
         return side
 
     def _build_workspace(self):
@@ -524,7 +541,8 @@ class MainWindow(QMainWindow):
         self.content_view = ContentView()
         self.content_view.setModel(self.content_model)
         self.content_view.setItemDelegate(self.row_delegate)
-        self.content_view.wire(self.row_delegate, self.toggle_select, self.navigate)
+        self.content_view.wire(self.row_delegate, self.toggle_select,
+                               self.navigate, self.open_preview)
         self.stack.addWidget(self.content_view)
 
         self.placeholder = self._build_placeholder()
@@ -806,6 +824,39 @@ class MainWindow(QMainWindow):
 
     def _update_out_label(self):
         self.out_label.setText(f"輸出：{os.path.abspath(self.out_root)}")
+        self.out_label.setToolTip(f"下載根目錄：{os.path.abspath(self.out_root)}")
+
+    def choose_output_dir(self):
+        """Ask for the download root. Nothing is downloaded here."""
+        start = os.path.abspath(self.out_root)
+        directory = QFileDialog.getExistingDirectory(
+            self, "選擇下載資料夾", start,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks)
+        if directory:
+            self.apply_output_dir(directory)
+
+    def apply_output_dir(self, path):
+        """Point downloads at `path` and remember it in `.env`.
+
+        Keeping the choice in `.env` means the CLI (`--out`, `BB_OUT_DIR`) and
+        the next GUI start agree; a GUI-only setting that the command line
+        ignored would be a trap.
+        """
+        if not path:
+            return False
+        path = os.path.abspath(os.path.expanduser(str(path)))
+        self.out_root = path
+        self.cfg.out_dir = path
+        self._update_out_label()
+        note = ""
+        try:
+            from ..wizard import env_value, update_env_file
+
+            update_env_file(self.cfg.env_file, {"BB_OUT_DIR": env_value(path)})
+        except Exception as exc:  # noqa: BLE001 - the change still applies in memory
+            note = f"（無法寫入設定檔：{exc}）"
+        self.set_status(f"下載資料夾：{path}{note}")
+        return True
 
     # ---------------------------------------------------------- catalog
     def load_catalog(self, course_id, refresh=False):
@@ -917,7 +968,8 @@ class MainWindow(QMainWindow):
         if not self.session and not error:
             title = "尚未登入 Blackboard"
             hint = "請先輸入帳號密碼，登入後就能瀏覽課程內容。"
-            tips = "· 密碼可選擇用 Windows DPAPI 加密儲存\n· 登入後課程清單會自動載入"
+            tips = ("· 密碼可選擇加密儲存（" + secure_storage_label() + "）"
+                    "\n· 登入後課程清單會自動載入")
         elif error:
             title = "讀取課程結構失敗"
             hint = detail or "無法取得這門課的內容，可能是權限或網路問題。"
@@ -1022,8 +1074,14 @@ class MainWindow(QMainWindow):
             self.list_head.setText("")
             return
         summary = self.selection_summary()
-        total = self.content_model.rowCount()
-        text = (f"{total} 個項目   ·   已選 {len(summary['top'])} 項"
+        rows = [self.content_model.node_at(row)
+                for row in range(self.content_model.rowCount())]
+        total = sum(1 for node in rows if node and not node.get("virtual"))
+        attachments = sum(1 for node in rows
+                          if node and node.get("kind") == "attachment")
+        text = (f"{total} 個項目"
+                + (f"（含 {attachments} 個附件）" if attachments else "")
+                + f"   ·   已選 {len(summary['top'])} 項"
                 f"（約 {summary['items']} 個檔案）")
         if self.filter_entry.text():
             text += "   ·   已套用篩選"
@@ -1052,6 +1110,8 @@ class MainWindow(QMainWindow):
         return {"top": top, "items": items}
 
     def toggle_select(self, node_id):
+        if (node_id or "").startswith("__attachment__"):
+            return
         children_of = None
         if self.catalog:
             children_of = lambda nid: (self.catalog.find(nid) or {}).get("children") or []
@@ -1065,7 +1125,9 @@ class MainWindow(QMainWindow):
         model = self.content_model
         for row in range(model.rowCount()):
             node = model.node_at(row)
-            if node:
+            # Virtual attachment rows have no checkbox and no content id to
+            # download; including them would put phantom entries in the tray.
+            if node and not node.get("virtual"):
                 model.selection._selected.add(node["id"])
         self._selection_ids = model.selection.ids()
         model.refresh()
@@ -1156,10 +1218,178 @@ class MainWindow(QMainWindow):
         layout.addLayout(actions)
         dialog.exec()
 
+    # ------------------------------------------------------- preview
+    def _node_link_url(self, node):
+        """The URL a preview can offer to open in a browser, or "".
+
+        External links carry it in `contentHandler.url`; assessments and LTI
+        tools only have the Ultra "User Interface View" link in `links`.
+        """
+        payload = node.get("payload") or {}
+        handler = payload.get("contentHandler") or {}
+        url = handler.get("url")
+        if url:
+            return str(url)
+        for link in payload.get("links") or []:
+            href = link.get("href") or ""
+            if href.startswith("http://") or href.startswith("https://"):
+                return href
+            if href.startswith("/") and self.session:
+                try:
+                    return self.session.safe_url(href)
+                except Exception:  # noqa: BLE001 - a link is optional
+                    return href
+            if href.startswith("/"):
+                return href
+        return ""
+
+    def open_preview(self, node):
+        """Show what an item is without downloading it."""
+        if not node:
+            return
+        if node.get("kind") == "folder":
+            self.navigate(node["id"])
+            return
+        if node.get("kind") == "attachment":
+            # The attachment is shown as its own row; preview means "open the
+            # file", not "describe the parent document again".
+            self.preview_attachment_row(node)
+            return
+        path_text = " › ".join(
+            part.get("title") or "" for part in self._path_chain(node["id"]))
+
+        def download():
+            self.start_download([node["id"]])
+
+        dialog = PreviewDialog(
+            node, self.pal, path_text=path_text, parent=self,
+            on_download=download if node.get("downloadable") else None,
+            link_url=self._node_link_url(node),
+            base_url=self.catalog.base_url if self.catalog else self.cfg.base_url,
+            on_preview_attachment=self.preview_attachment,
+            on_preview_file=self.preview_file_node)
+        dialog.exec()
+
+    def preview_attachment(self, url, name, item_id, on_done, on_error):
+        """Fetch one embedded attachment into the preview cache and open it.
+
+        Runs on the task runner so a large PDF never freezes the dialog. The
+        download uses a scratch session (see `LearnSession.download_preview`),
+        so it cannot corrupt a pull that is running at the same time.
+        """
+        target = preview_cache_path(item_id, name)
+
+        def work():
+            if os.path.isfile(target) and os.path.getsize(target) > 0:
+                return target
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            status, _size, info = self.session.download_preview(url, target)
+            if status == "failed":
+                raise RuntimeError(str(info))
+            return target
+
+        self.tasks.start(work, lambda path: on_done(path, name),
+                         lambda message: on_error(str(message)))
+
+    def preview_file_node(self, node, on_done, on_error):
+        """Preview a file item: resolve its attachment, download it, open it."""
+        course_id = self.catalog.course_id if self.catalog else self.cfg.course_id
+
+        def work():
+            data = self.session.api_get(
+                f"/courses/{course_id}/contents/{node['id']}/attachments")
+            results = (data or {}).get("results") or []
+            if not results:
+                raise RuntimeError("這個項目沒有可預覽的檔案")
+            attachment = results[0]
+            name = (attachment.get("fileName") or node.get("title")
+                    or "attachment")
+            url = self.session.url(
+                f"/courses/{course_id}/contents/{node['id']}/attachments/"
+                f"{attachment['id']}/download")
+            target = preview_cache_path(node["id"], name)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if not (os.path.isfile(target) and os.path.getsize(target) > 0):
+                status, _size, info = self.session.download_preview(url, target)
+                if status == "failed":
+                    raise RuntimeError(str(info))
+            return target, name
+
+        self.tasks.start(work,
+                         lambda payload: on_done(payload[0], payload[1]),
+                         lambda message: on_error(str(message)))
+
+    # -- embedded attachments (virtual rows) ---------------------------
+    def preview_attachment_row(self, node):
+        """Open one embedded attachment in the system viewer."""
+        if not self.session:
+            self.open_connect()
+            return
+        self.set_status(f"正在取得附件：{node.get('title') or ''} …")
+
+        def done(path, name):
+            opened = open_in_file_manager(path)
+            self.set_status(
+                f"已用系統程式開啟：{name}" if opened else f"已下載：{path}")
+
+        def failed(message):
+            self.set_status(f"無法預覽附件：{message}", error=True)
+
+        self.preview_attachment(node.get("attachmentUrl") or "",
+                                node.get("attachmentName") or node.get("title")
+                                or "attachment",
+                                node.get("parentContentId") or "",
+                                done, failed)
+
+    def download_attachment(self, node):
+        """Save one embedded attachment into the course output tree."""
+        if not self.session:
+            self.open_connect()
+            return
+        if not self.catalog:
+            self.set_status("請先選擇並載入一門課程", error=True)
+            return
+        parent = self.catalog.find(node.get("parentContentId") or "")
+        chain = self._path_chain(parent["id"]) if parent else []
+        # Same location the full pull would use: the directory holding the
+        # document, not a folder named after the document.
+        parts = [sanitize(part.get("title") or part.get("id") or "item")
+                 for part in chain[:-1]]
+        target_dir = os.path.join(course_dir_for(self.out_root, self.catalog),
+                                  *parts)
+        dest = os.path.join(
+            target_dir,
+            sanitize(node.get("attachmentName") or node.get("title")
+                     or "attachment", fallback="attachment"))
+        url = node.get("attachmentUrl") or ""
+
+        def work():
+            os.makedirs(target_dir, exist_ok=True)
+            status, size, info = self.session.download_preview(url, dest)
+            if status == "failed":
+                raise RuntimeError(str(info))
+            return dest, size
+
+        def done(payload):
+            path, size = payload
+            self.set_status(f"已下載附件：{path}（{_human_bytes(size)}）")
+
+        def failed(message):
+            self.set_status(f"附件下載失敗：{message}", error=True)
+
+        self.tasks.start(work, done, failed)
+
     # ------------------------------------------------------- downloads
     def _on_row_button(self, action, node):
         if action == "open":
             self.navigate(node["id"])
+        elif node.get("kind") == "attachment":
+            if action == "download":
+                self.download_attachment(node)
+            else:
+                self.preview_attachment_row(node)
+        elif action == "preview":
+            self.open_preview(node)
         else:
             self.start_download([node["id"]])
 
@@ -1305,14 +1535,10 @@ class MainWindow(QMainWindow):
             if parent == path:
                 break
             path = parent
-        try:
-            if os.name == "nt":
-                os.startfile(path)  # noqa: S606 - user-initiated, their own path
-            else:
-                webbrowser.open(f"file://{path}")
+        if open_in_file_manager(path):
             self.set_status(f"已開啟：{path}")
-        except OSError as exc:
-            self.set_status(f"無法開啟資料夾：{exc}", error=True)
+        else:
+            self.set_status(f"無法開啟資料夾（找不到檔案管理員）：{path}", error=True)
 
     def set_status(self, message, error=False):
         self.status.setText(message)
@@ -1401,21 +1627,35 @@ def _human_bytes(num):
     return f"{value:.1f} GB"
 
 
-def run_gui(cfg, log=None, inspect=False, inspect_dir=None):
+def run_gui(cfg, log=None, inspect=False, inspect_dir=None, smoke=False):
     """Create the Qt application and window. Returns the exit code.
 
     `inspect=True` turns on click inspection: every click is recorded with the
     widget under the cursor, its resolved style state, and a magnified crop, so a
     UI complaint can be diagnosed from ground truth instead of screenshots.
+
+    `smoke=True` opens the real window and closes it after a moment, then exits
+    0. The packaging check uses it: a build can import Qt and still fail to open
+    a window (a missing platform plugin is the classic case), and "the process
+    is still alive" is not evidence that a window exists.
     """
     app = QApplication.instance() or QApplication([])
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")          # consistent base for the QSS to sit on
-    window = MainWindow(cfg, log)
+    # A smoke run must not log in: on a machine with saved credentials that
+    # starts a network task, and closing the window 1.5s later destroyed its
+    # QThread mid-flight (SIGABRT). The check is "can a window be created".
+    window = MainWindow(cfg, log, bootstrap=not smoke)
     window.show()
     if inspect:
         from .inspect import Inspector
 
         target = inspect_dir or os.path.join(os.getcwd(), "_debug")
         window.inspector = Inspector(window, target, log)
+    if smoke:
+        if log:
+            log("GUI smoke test：視窗已開啟，1.5 秒後自動關閉。")
+        # close() runs `closeEvent` (pollers/tasks stop) instead of yanking the
+        # event loop out from under whatever is still running.
+        QTimer.singleShot(1500, window.close)
     return app.exec()

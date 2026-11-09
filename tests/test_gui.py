@@ -693,6 +693,7 @@ class CourseFilterUiTests(unittest.TestCase):
         self.assertIn("0 / 4", self._footer())
 
 
+@unittest.skipUnless(HAS_TK, "human_bytes lives in the Tk module, which needs Tk")
 class HumanBytesTests(unittest.TestCase):
     def test_formatting(self):
         from bbpull.gui.app import human_bytes

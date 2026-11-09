@@ -109,6 +109,26 @@ def _check_theme():
     return ok, lines
 
 
+def _state_is_ephemeral(path):
+    """True when the state directory will not survive the process.
+
+    The failure this catches is PyInstaller's `_MEIxxxx` unpack folder: the
+    program can write there fine and still lose the saved login at exit. Keying
+    off the `_MEI` component rather than "anywhere under $TMPDIR" matters on
+    Linux, where a container or test harness may legitimately run with `$HOME`
+    under `/tmp` - flagging that turned a healthy install into a failing
+    self-test.
+    """
+    resolved = os.path.normcase(os.path.abspath(path))
+    temporary = os.path.normcase(tempfile.gettempdir())
+    inside_temp = resolved == temporary or resolved.startswith(temporary + os.sep)
+    if not inside_temp:
+        return False
+    # `normcase` only lowercases on Windows; `_MEI` is upper-case on every
+    # platform, so compare case-insensitively explicitly.
+    return "_mei" in resolved.lower() or resolved == temporary
+
+
 def _check_write_access():
     """The program must be able to write, and keep, its state.
 
@@ -122,7 +142,6 @@ def _check_write_access():
         from .config import load_config
 
         cfg = load_config(None)
-        temporary = os.path.normcase(tempfile.gettempdir())
         for label, path in (("state", getattr(cfg, "state_dir", None)),
                             ("output", getattr(cfg, "out_dir", None))):
             if not path:
@@ -139,14 +158,14 @@ def _check_write_access():
                 lines.append(f"  [FAIL] {label} 目錄不可寫 {resolved} - {exc}")
                 continue
 
-            if label == "state" and os.path.normcase(resolved).startswith(temporary):
+            if label == "state" and _state_is_ephemeral(resolved):
                 ok = False
                 lines.append(f"  [FAIL] state 目錄在暫存區，登入狀態會在結束時消失："
                              f"{resolved}")
             else:
                 lines.append(f"  [ok]   {label} 目錄可寫：{resolved}")
 
-        if os.path.normcase(os.path.abspath(cfg.state_dir)).startswith(temporary):
+        if _state_is_ephemeral(cfg.state_dir):
             lines.append("         請設定 BB_STATE_DIR 指向固定位置。")
     except Exception as exc:  # noqa: BLE001
         ok = False
@@ -155,22 +174,42 @@ def _check_write_access():
 
 
 def _check_qt_platform():
-    """Qt needs its platform plugin; a missing one is a common packaging failure."""
+    """Qt needs its platform plugin; a missing one is a common packaging failure.
+
+    Two details cost real time to discover here:
+
+    * the directory moved. PySide6 6.5+ keeps Qt under `PySide6/Qt/`, so the
+      plugins live in `PySide6/Qt/plugins/platforms`; older layouts used
+      `PySide6/plugins/platforms`. Both are checked, which is also what makes
+      this check work against a PyInstaller bundle (the bundle preserves the
+      same relative layout).
+    * the plugin name is platform-specific: Windows has `qwindows*.dll`, Linux
+      has `libqxcb.so` and friends, macOS has `libqcocoa.dylib`. Checking only
+      for `qwindows` made a perfectly good Linux bundle report a hard failure.
+    """
     lines = []
     try:
         import PySide6
         from pathlib import Path
 
-        plugins = Path(PySide6.__file__).parent / "plugins" / "platforms"
-        if plugins.is_dir():
-            found = [p.name for p in plugins.glob("qwindows*")]
-            if found:
-                lines.append(f"  [ok]   Qt 平台外掛 {', '.join(found[:3])}")
-                return True, lines
-            lines.append(f"  [FAIL] Qt 平台外掛目錄存在但沒有 qwindows：{plugins}")
-            return False, lines
-        lines.append(f"  [warn] 找不到 Qt 平台外掛目錄：{plugins}")
-        return True, lines
+        root = Path(PySide6.__file__).parent
+        candidates = [root / "plugins" / "platforms",
+                      root / "Qt" / "plugins" / "platforms"]
+        plugins = next((path for path in candidates if path.is_dir()), None)
+        if plugins is None:
+            lines.append(f"  [warn] 找不到 Qt 平台外掛目錄：{candidates[-1]}")
+            return True, lines
+
+        found = sorted({path.name for pattern in
+                        ("qwindows*", "qminimal*", "qoffscreen*",
+                         "libqxcb*", "libqwayland*", "libqeglfs*",
+                         "libqcocoa*", "libqminimal*")
+                        for path in plugins.glob(pattern)})
+        if found:
+            lines.append(f"  [ok]   Qt 平台外掛 {', '.join(found[:3])}")
+            return True, lines
+        lines.append(f"  [FAIL] Qt 平台外掛目錄存在但沒有任何可用外掛：{plugins}")
+        return False, lines
     except Exception as exc:  # noqa: BLE001
         lines.append(f"  [warn] 無法檢查 Qt 外掛：{type(exc).__name__}")
         return True, lines

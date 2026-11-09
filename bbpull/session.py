@@ -9,6 +9,7 @@ Design notes
   school-specific login page does not silently produce an anonymous session.
 """
 
+import html
 import json
 import os
 import re
@@ -140,6 +141,149 @@ def _looks_authenticated(html_text):
     return any(marker in lowered for marker in markers)
 
 
+#: The login page renders its failure text into this element. Quoting the
+#: message back to the user is the difference between "still anonymous" and
+#: "the site says your password is wrong".
+_LOGIN_ERROR_RE = re.compile(
+    r'id="loginErrorMessage"[^>]*>(.*?)(?:</(?:div|span|p|li|section)>|</form>)',
+    re.I | re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def _visible_text(fragment):
+    """Tag-stripped, entity-decoded, single-spaced text from an HTML fragment."""
+    text = html.unescape(_TAG_RE.sub(" ", fragment or ""))
+    return _WS_RE.sub(" ", text).strip()
+
+
+def _login_error_message(html_text):
+    """The site's own login error text, or "" when it did not render one."""
+    match = _LOGIN_ERROR_RE.search(html_text or "")
+    if not match:
+        return ""
+    return _visible_text(match.group(1))[:400]
+
+
+def _mfa_challenge(html_text):
+    """True when the response is the second-factor form rather than the login form.
+
+    Measured on Learn 4001: the initial login page already *contains* the MFA
+    markup inside a template (`showMFAVerification` literally holds
+    `$showMFAVerification`), so the marker alone proves nothing. A real challenge
+    replaces the password field and sets the flag to `true`.
+    """
+    text = html_text or ""
+    lowered = text.lower()
+    if re.search(r'name="showMFAVerification"[^>]*value="true"', text, re.I):
+        return True
+    has_password = bool(re.search(r'type=["\']password["\']', text, re.I))
+    has_mfa = ("totp-verification-input" in lowered
+               or "mfa-verification-title" in lowered
+               or "mfa-registration-title" in lowered)
+    return has_mfa and not has_password
+
+
+def _is_sso_host(final_url, base_url):
+    """True when a redirect landed on a non-Blackboard identity provider."""
+    host = (urlparse(final_url or "").hostname or "").lower()
+    origin = (urlparse(base_url or "").hostname or "").lower()
+    if not host or not origin or host == origin:
+        return False
+    if any(host == allowed or host.endswith("." + allowed)
+           for allowed in ALLOWED_REDIRECT_HOSTS):
+        return False
+    return True
+
+
+def _login_failure_reason(response, base_url):
+    """Explain a rejected login attempt, in the site's or our own words."""
+    if response is None:
+        return ""
+    text = getattr(response, "text", "") or ""
+    final_url = getattr(response, "url", "") or ""
+    if _is_sso_host(final_url, base_url):
+        return f"站台把登入導向 {urlparse(final_url).hostname}（SSO），本機帳密表單不適用"
+    if _mfa_challenge(text):
+        return "站台要求第二因素驗證（MFA／TOTP）；bbpull 不會代填驗證碼"
+    message = _login_error_message(text)
+    if message:
+        return message
+    lowered = text.lower()
+    if "samlrequest" in lowered or "shibboleth" in lowered:
+        return "登入頁是 SAML／Shibboleth SSO，本機帳密表單不適用"
+    return ""
+
+
+def _normalize_cookie(item):
+    """One cookie dict in the shape `import_cookies` understands."""
+    if not isinstance(item, dict):
+        return None
+    name = item.get("name")
+    if not name:
+        return None
+    domain = (item.get("domain") or "").strip()
+    if domain.startswith("#HttpOnly_"):
+        domain = domain[len("#HttpOnly_"):]
+    return {
+        "name": str(name),
+        "value": "" if item.get("value") is None else str(item.get("value")),
+        "domain": domain,
+        "path": item.get("path") or "/",
+        "secure": bool(item.get("secure")),
+        "expires": item.get("expires", item.get("expirationDate")),
+    }
+
+
+def _parse_cookie_file(raw):
+    """Parse a cookie export. Returns (cookies, stored_base_url).
+
+    Three formats show up in practice, and telling the user "your cookie file is
+    malformed" when it is merely a different export is not helpful:
+
+    * our own jar:            {"base_url": ..., "cookies": [...]}
+    * browser-extension JSON: [{"name": ..., "value": ..., "domain": ...}, ...]
+    * Netscape cookies.txt:   domain\\tflag\\tpath\\tsecure\\texpiry\\tname\\tvalue
+      (what `curl -c` and most "export cookies" extensions produce)
+    """
+    text = (raw or "").strip()
+    if not text:
+        return [], None
+    if text[0] in "[{":
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            return [], None
+        if isinstance(payload, dict):
+            items = payload.get("cookies")
+            base = payload.get("base_url")
+        else:
+            items, base = payload, None
+        cookies = [cookie for cookie in
+                   (_normalize_cookie(item) for item in (items or []))
+                   if cookie]
+        return cookies, base
+
+    cookies = []
+    for line in text.splitlines():
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+        if line.startswith("#") and not line.startswith("#HttpOnly_"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, _flag, path, secure, _expires, name, value = parts[:7]
+        cookie = _normalize_cookie({
+            "name": name, "value": value, "domain": domain, "path": path,
+            "secure": secure.strip().lower() == "true",
+        })
+        if cookie:
+            cookies.append(cookie)
+    return cookies, None
+
+
 class LearnSession:
     def __init__(self, config, logger=None, credential_provider=None):
         self.config = config
@@ -157,6 +301,10 @@ class LearnSession:
         )
         self.user_id = None
         self.login_strategy = None
+        #: Last meaningful HTTP response from a login attempt. Used to quote the
+        #: site's own rejection text (wrong password, MFA, SSO) instead of
+        #: reporting every failure as "still anonymous".
+        self._login_attempt_response = None
         self._lock = threading.Lock()
 
     # ---------------------------------------------------------------- paths
@@ -230,15 +378,18 @@ class LearnSession:
     def load_cookies(self, path):
         if not path or not os.path.isfile(path):
             return 0
-        with open(path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        stored_base = payload.get("base_url")
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            raw = handle.read()
+        cookies, stored_base = _parse_cookie_file(raw)
+        if not cookies:
+            self.log(f"[warn] no cookies could be read from {path}")
+            return 0
         if stored_base and stored_base.rstrip("/") != self.base:
             self.log(
                 f"[warn] cookie file was saved for {stored_base}, "
                 f"current base is {self.base}"
             )
-        return self.import_cookies(payload.get("cookies"))
+        return self.import_cookies(cookies)
 
     # ---------------------------------------------------------------- login
     def _collect_credentials(self):
@@ -275,6 +426,12 @@ class LearnSession:
                     self.login_strategy = "cached-cookie"
                     self.log(f"[auth] existing session is valid (user {self.user_id})")
                     return self
+                # The cached session is dead. Do not carry its cookies into a
+                # fresh login: the form's nonce is issued for the session that
+                # fetched the page, and a stale identifier alongside it is one
+                # more way for the POST to be rejected.
+                self.http.cookies.clear()
+                self.log("[auth] cached session expired; starting a fresh login")
 
         state = self._fetch_login_page()
         errors = []
@@ -289,6 +446,12 @@ class LearnSession:
                 errors.append(f"{name}: {exc}")
                 self.log(f"[auth] {name} failed: {exc}")
                 continue
+            except requests.RequestException as exc:
+                # A network failure must be a reported login failure, not an
+                # uncaught traceback out of the GUI's worker thread.
+                errors.append(f"{name}: network error: {exc}")
+                self.log(f"[auth] {name} failed: {exc}")
+                continue
             if result:
                 self.login_strategy = name
                 self.user_id = self._discover_user_id() or "unknown"
@@ -297,16 +460,31 @@ class LearnSession:
                 self.log(f"[auth] logged in via {name} as user {self.user_id}")
                 self.log(f"[auth] cookies cached at {jar}")
                 return self
-            errors.append(f"{name}: rejected (still anonymous)")
-            self.log(f"[auth] {name} rejected - still anonymous")
+            reason = _login_failure_reason(self._login_attempt_response, self.base)
+            errors.append(f"{name}: rejected" + (f": {reason}" if reason else ""))
+            self.log(f"[auth] {name} rejected"
+                     + (f" - {reason}" if reason else " - still anonymous"))
 
+        detail = _login_failure_reason(self._login_attempt_response, self.base)
+        if detail and not _mfa_challenge(getattr(self._login_attempt_response, "text", "")
+                                         or "") and not _is_sso_host(
+                getattr(self._login_attempt_response, "url", ""), self.base):
+            advice = (
+                "\n站台回覆：{message}"
+                "\n請先用瀏覽器以同一組帳號密碼登入確認；密碼錯誤、被鎖定或"
+                "需要改密碼時，bbpull 無法繞過。"
+            ).format(message=detail)
+        else:
+            advice = (
+                "\n如果瀏覽器登入時會轉到 SSO（Azure AD／Shibboleth／校園入口）"
+                "或要求驗證碼（MFA），那些步驟無法自動化：請用瀏覽器登入後"
+                "匯出 cookie，並把 BB_COOKIE_FILE 指向該 JSON 檔（詳見 README"
+                "「SSO 備援」）。"
+            )
         raise LoginError(
             "all login strategies failed.\n  - "
             + "\n  - ".join(errors)
-            + "\nIf your school uses SSO (Shibboleth / Azure AD / portal redirect), "
-            "the credential form is not on this server. Log in with a browser, "
-            "export cookies (see README 'SSO fallback'), and point "
-            "BB_COOKIE_FILE at the exported file."
+            + advice
         )
 
     # -- login internals --------------------------------------------------
@@ -418,25 +596,41 @@ class LearnSession:
         }
         target = urljoin(state.get("url") or self.base + "/", action)
         self.log(f"[auth] POST {target} (form-post)")
-        self.http.post(
+        response = self.http.post(
             target,
             data=filtered,
             timeout=self.config.timeout,
             allow_redirects=True,
         )
+        self._remember_login_response(response)
         return self._verify_authenticated()
 
     def _strategy_direct_post(self, state):
         payload = self._login_payload(state)
         target = self.url("/webapps/login/")
         self.log(f"[auth] POST {target} (direct-post)")
-        self.http.post(
+        response = self.http.post(
             target,
             data=payload,
             timeout=self.config.timeout,
             allow_redirects=True,
         )
+        self._remember_login_response(response)
         return self._verify_authenticated()
+
+    def _remember_login_response(self, response):
+        """Keep the first informative HTML response from a login attempt.
+
+        The form-based POSTs return the page that says *why* the login failed
+        ("The username or password you typed is incorrect", an MFA challenge, an
+        SSO landing page). The later JSON probes return opaque bodies, so they
+        must not overwrite it.
+        """
+        if self._login_attempt_response is not None:
+            return
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if "html" in content_type and response.status_code < 500:
+            self._login_attempt_response = response
 
     def _strategy_ultra_login(self, state):
         """Some Ultra tenants expose /api/ultra/... or an LTI-free JSON login."""
@@ -562,15 +756,20 @@ class LearnSession:
         return collected
 
     # ----------------------------------------------------------- downloads
-    def download(self, url, dest_path, overwrite=False, expected_size=None):
+    def download(self, url, dest_path, overwrite=False, expected_size=None,
+                 http=None):
         """Stream a file to disk. Returns (status, bytes, final_path).
 
         status is one of: 'saved', 'skipped', 'failed'.
         Writes to a `.part` file first so an interrupted run never leaves a
         truncated file that a later resume would treat as complete.
+
+        `http` is for callers that must not share the main session (preview
+        downloads run on a GUI worker thread while a pull may be running).
         """
         from .paths import long_path
 
+        client = http or self.http
         if os.path.exists(dest_path) and not overwrite:
             size = os.path.getsize(dest_path)
             if size > 0 and (expected_size is None or size == expected_size):
@@ -584,7 +783,7 @@ class LearnSession:
         while True:
             attempt += 1
             try:
-                with self.http.get(
+                with client.get(
                     target,
                     stream=True,
                     timeout=self.config.timeout,
@@ -621,6 +820,19 @@ class LearnSession:
             except OSError as exc:
                 _quiet_remove(tmp_path)
                 return "failed", 0, f"write error: {exc}"
+
+    def download_preview(self, url, dest_path):
+        """Download one attachment for an interactive preview.
+
+        The main `requests.Session` is explicitly not safe for concurrent use
+        and the preview runs on a GUI worker thread, possibly while a pull is
+        in progress. A scratch session carrying the same cookies keeps the two
+        independent (and inherits every retry/`.part` guarantee of `download`).
+        """
+        scratch = requests.Session()
+        scratch.headers.update(self.http.headers)
+        scratch.cookies.update(self.http.cookies)
+        return self.download(url, dest_path, overwrite=True, http=scratch)
 
 
 def _quiet_remove(path):

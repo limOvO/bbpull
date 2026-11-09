@@ -30,14 +30,15 @@ import queue
 import threading
 import time
 import tkinter as tk
-import webbrowser
 from collections import OrderedDict
 
 import customtkinter as ctk
 
 from ..catalog import ANNOUNCEMENTS_ID, Catalog, catalog_cache_path, walk
+from ..desktop import open_in_file_manager
 from ..errors import ApiError, ConfigError, LoginError
 from ..logging_util import wrap_logger
+from ..secrets_store import secure_storage_label
 from ..selective import JobManager, course_dir_for, run_download_job
 from ..session import LearnSession
 from .anim import Animator, Shimmer, Spinner, lerp_color, stagger_delays
@@ -968,7 +969,7 @@ class BbpullApp(ctk.CTk):
             return (
                 "尚未登入 Blackboard",
                 "請先輸入帳號密碼，登入後就能瀏覽課程內容。",
-                ("密碼可選擇用 Windows DPAPI 加密儲存",
+                ("密碼可選擇加密儲存（" + secure_storage_label() + "）",
                  "登入後課程清單會自動載入"),
             )
         if error:
@@ -1563,14 +1564,10 @@ class BbpullApp(ctk.CTk):
             if parent == path:
                 break
             path = parent
-        try:
-            if os.name == "nt":
-                os.startfile(path)  # noqa: S606 - user-initiated, their own path
-            else:
-                webbrowser.open(f"file://{path}")
+        if open_in_file_manager(path):
             self.set_status(f"已開啟：{path}")
-        except OSError as exc:
-            self.set_status(f"無法開啟資料夾：{exc}", error=True)
+        else:
+            self.set_status(f"無法開啟資料夾（找不到檔案管理員）：{path}", error=True)
 
     # ------------------------------------------------------------- theming
     def toggle_theme(self):
@@ -1658,7 +1655,9 @@ class BbpullApp(ctk.CTk):
 
         ctk.CTkLabel(win, text="連線到 Blackboard", font=fonts["h1"],
                      text_color=pal.text).pack(anchor="w", padx=22, pady=(20, 2))
-        ctk.CTkLabel(win, text="密碼只會用在這個程式裡，並可選擇加密儲存到你的 Windows 帳號。",
+        ctk.CTkLabel(win,
+                     text="密碼只會用在這個程式裡，並可選擇加密儲存（"
+                          + secure_storage_label() + "）。",
                      font=fonts["tiny"], text_color=pal.text_dim, justify="left",
                      wraplength=410).pack(anchor="w", padx=22, pady=(0, 14))
 
@@ -1846,12 +1845,14 @@ def enable_dpi_awareness():
             pass
 
 
-def run_gui(cfg, log=None, notice=None, **_ignored):
+def run_gui(cfg, log=None, notice=None, smoke=False, **_ignored):
     """Create and run the desktop app. Returns the exit code.
 
     `notice` is shown in the status bar at startup. The CLI uses it to explain a
     fallback from Qt to Tk: a downgrade the user cannot see is how a bug report
     ends up describing the wrong interface.
+    `smoke=True` closes the window after a moment; the packaging check uses it
+    instead of trusting that a process which did not crash is showing anything.
     `**_ignored` absorbs Qt-only options (`inspect`, `inspect_dir`) so the CLI can
     call either engine through one signature.
     """
@@ -1864,5 +1865,7 @@ def run_gui(cfg, log=None, notice=None, **_ignored):
     app = BbpullApp(cfg, log)
     if notice:
         app.set_status(str(notice))
+    if smoke:
+        app.after(1500, app.destroy)
     app.mainloop()
     return 0

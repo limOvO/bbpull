@@ -17,6 +17,7 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
 
 from ..catalog import ANNOUNCEMENTS_ID, walk
 from ..palette import KIND_LABELS
+from ..preview import attachment_row, item_attachments
 
 #: Custom roles. The delegate reads the raw node through `NodeRole` and does all
 #: its own layout, which is what keeps the model free of presentation concerns.
@@ -156,11 +157,29 @@ class CatalogModel(QAbstractListModel):
         if not self._catalog:
             return []
         if self.scope_all and self._filter:
-            return list(walk(self._catalog.tree))
+            return self._with_attachments(list(walk(self._catalog.tree)))
         if self._folder == "root":
-            return list(self._catalog.tree)
+            return self._with_attachments(list(self._catalog.tree))
         node = self._catalog.find(self._folder)
-        return list((node or {}).get("children") or [])
+        return self._with_attachments(list((node or {}).get("children") or []))
+
+    @staticmethod
+    def _with_attachments(nodes):
+        """Flatten embedded files into indented rows under their parent.
+
+        Ultra keeps PDFs/Excel inside a document's body rather than in the tree,
+        so without this they only existed behind the preview dialog. The rows
+        are virtual: they carry their own id and actions but never enter the
+        selection set, because the tray's download works on content ids.
+        """
+        out = []
+        for node in nodes:
+            out.append(node)
+            if node.get("kind") == "folder" or not node.get("attachmentCount"):
+                continue
+            for index, attachment in enumerate(item_attachments(node)):
+                out.append(attachment_row(node, attachment, index))
+        return out
 
     def refresh(self):
         """Re-read the current folder without changing it."""

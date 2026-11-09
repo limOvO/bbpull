@@ -36,6 +36,17 @@ BARE = {"exe": r"C:\Python312\python.exe", "qt": None, "tk": None, "tkinter": Tr
 NO_TKINTER = {"exe": r"C:\Python312\python.exe", "qt": None, "tk": None,
               "tkinter": False}
 
+#: The routing tests import the Tk app so they can replace its runner. Tk is an
+#: optional system package on Linux, so those tests only run where the fallback
+#: interface can actually be imported.
+try:
+    import tkinter  # noqa: F401
+    import customtkinter  # noqa: F401
+
+    HAS_TK = True
+except Exception:  # noqa: BLE001 - optional dependency
+    HAS_TK = False
+
 
 class DecideTests(unittest.TestCase):
     def test_prefers_qt_when_available(self):
@@ -144,6 +155,7 @@ class ReportTests(unittest.TestCase):
             self.assertNotIn("預設會使用 : Qt（PySide6）", text)
 
 
+@unittest.skipUnless(HAS_TK, "the Tk fallback (and customtkinter) is not installed")
 class CliEngineRoutingTests(unittest.TestCase):
     """End-to-end: the CLI must route to the chosen engine and say so.
 
